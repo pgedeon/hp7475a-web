@@ -11,6 +11,8 @@ import logging
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, UploadFile, File, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse
+from pathlib import Path
 from pydantic import BaseModel, Field
 
 from app.jobs.models import IllegalTransition, JobState
@@ -307,8 +309,21 @@ async def prepare_job(job_id: str, request: Request) -> dict:
                 )
             except Exception as exc:
                 raise HTTPException(422, f"pipeline failed: {exc}")
+            preview_dir = state.settings.data_dir / "previews"
+            preview_dir.mkdir(parents=True, exist_ok=True)
+            preview_path = preview_dir / f"{job_id}.svg"
+            try:
+                preview_path.write_text(
+                    Path(result.preview_svg_path).read_text(encoding="utf-8")
+                )
+            except OSError:
+                preview_path = preview_dir / job_id  # placeholder on failure
+                preview_path.write_text(
+                    "<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10'/>"
+                )
             state.jobs.update(job_id, hpgl=result.hpgl,
-                              stats={"pipeline": result.stats})
+                              stats={"pipeline": result.stats,
+                                     "preview": str(preview_path)})
     return _job_command(request, job_id, WorkerCommand.PREPARE)
 
 
@@ -330,6 +345,20 @@ async def resume_job(job_id: str, request: Request) -> dict:
 @router.post("/jobs/{job_id}/cancel")
 async def cancel_job(job_id: str, request: Request) -> dict:
     return _job_command(request, job_id, WorkerCommand.CANCEL)
+
+
+@router.get("/jobs/{job_id}/preview")
+async def job_preview(job_id: str, request: Request):
+    """Post-processing preview SVG (what will actually be plotted)."""
+    state = get_state(request)
+    try:
+        job = state.jobs.get(job_id)
+    except JobNotFound:
+        raise HTTPException(404, "job not found")
+    preview = (state.settings.data_dir / "previews" / f"{job_id}.svg")
+    if not preview.is_file():
+        raise HTTPException(404, "preview not ready (prepare the job first)")
+    return FileResponse(preview, media_type="image/svg+xml")
 
 
 @router.delete("/jobs/{job_id}")

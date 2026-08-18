@@ -1,0 +1,31 @@
+[Unit]
+Description=HP 7475A Web Plotter Controller
+Documentation=https://github.com/pgedeon/hp7475a-web
+After=network.target dev-serial-by\x2did-usb\x2dFTDI_FT232R_USB_UART_A10OCJBA\x2dif00\x2dport0.device
+Wants=dev-serial-by\x2did-usb\x2dFTDI_FT232R_USB_UART_A10OCJBA\x2dif00\x2dport0.device
+
+[Service]
+Type=simple
+# EDIT: the user that owns the serial port access (dialout group)
+User=plotter
+Group=dialout
+# EDIT: project checkout path
+WorkingDirectory=/opt/hp7475a-web
+# EDIT: venv path
+ExecStart=/opt/hp7475a-web/.venv/bin/uvicorn app.main:app \
+    --host 127.0.0.1 --port 8750
+Environment=HP7475A_DATA_DIR=/opt/hp7475a-web/data
+Restart=on-failure
+RestartSec=3
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/hp7475a-web/data
+ProtectHome=true
+PrivateTmp=true
+DeviceAllow=char-ttyUSB rw
+DeviceAllow=char-ptmx rw
+
+[Install]
+WantedBy=multi-user.target
