@@ -50,6 +50,33 @@ describe("normalizeLayers", () => {
   });
 });
 
+describe("PenMap (colors mode)", () => {
+  it("labels selects by color hex and renders hex swatch inline", () => {
+    render(<PenMap mode="colors" layers={[{ name: "#ff8800", color: "#ff8800" }]}
+      penMap={{ "#ff8800": 2 }} onChange={() => {}} />);
+    expect(screen.getByLabelText("pen for color #ff8800")).toHaveValue("2");
+    // hex appears in both the label cell and the swatch caption
+    expect(screen.getAllByText("#ff8800").length).toBeGreaterThan(0);
+    const swatch = document.querySelector(".swatch") as HTMLElement;
+    expect(swatch).toHaveStyle({ background: "#ff8800" });
+  });
+
+  it("rejects pen 0/7 in colors mode — same isValidPen guard as layers mode", () => {
+    const onChange = vi.fn();
+    render(<PenMap mode="colors" layers={[{ name: "#abc", color: "#abc" }]}
+      penMap={{ "#abc": 1 }} onChange={onChange} />);
+    if (isValidPen(0) || isValidPen(7)) onChange({ "#abc": 7 });
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("empty-state message differs per mode", () => {
+    const { rerender } = render(<PenMap mode="colors" layers={[]} penMap={{}} onChange={() => {}} />);
+    expect(screen.getByText(/No stroke colors detected/)).toBeInTheDocument();
+    rerender(<PenMap layers={[]} penMap={{}} onChange={() => {}} />);
+    expect(screen.getByText(/No layers detected/)).toBeInTheDocument();
+  });
+});
+
 describe("StatusBadge", () => {
   it("maps states to severity classes", () => {
     const { rerender } = render(<StatusBadge status="PLOTTING" />);

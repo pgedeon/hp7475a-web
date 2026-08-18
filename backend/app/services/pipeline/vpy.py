@@ -208,6 +208,41 @@ def _place_on_paper(doc: vp.Document, paper: Paper, options: PipelineOptions) ->
 # pipeline
 # ---------------------------------------------------------------------------
 
+def run_pipeline_color(
+    svg_path: str | Path,
+    paper: str,
+    options: PipelineOptions | dict | None,
+    color_pen_map: dict[str, int],
+) -> PipelineResult:
+    """Color-mapped variant of run_pipeline (goal 3e598c6e).
+
+    Regroups the SVG by effective stroke color into synthetic layers
+    1..N (colormap.group_by_color), translates *color_pen_map* (keys =
+    color strings exactly as analysis.stroke_colors reports them) into a
+    layer-keyed map, then delegates to :func:`run_pipeline`.
+
+    Raises ValueError for pen-map colors not present in the file.
+    """
+    import tempfile
+
+    from app.services.pipeline.colormap import color_pen_map_to_layers, group_by_color
+
+    raw = Path(svg_path).read_bytes()
+    grouped_bytes, ordered = group_by_color(raw)
+    if not ordered:
+        raise ValueError("SVG has no stroked drawable elements to map by color")
+    layer_map = color_pen_map_to_layers(color_pen_map, ordered)
+    with tempfile.NamedTemporaryFile(
+        suffix=".svg", prefix="colormap-", delete=False
+    ) as tmp:
+        tmp.write(grouped_bytes)
+        tmp_path = tmp.name
+    try:
+        return run_pipeline(tmp_path, paper, options, layer_map)
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+
+
 def run_pipeline(
     svg_path: str | Path,
     paper: str,

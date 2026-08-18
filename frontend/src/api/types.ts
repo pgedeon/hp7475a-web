@@ -53,6 +53,9 @@ export interface DeviceError {
 /** Analysis layers may arrive as plain strings (names) or richer objects. */
 export type RawLayer = string | { name?: string; color?: string; [k: string]: unknown };
 
+/** How pen_map keys are interpreted: Inkscape layer names or stroke-color hexes. */
+export type PenMapMode = "layers" | "colors";
+
 export interface Analysis {
   bbox_mm?: { min_x?: number; min_y?: number; max_x?: number; max_y?: number } | number[] | null;
   stroke_colors?: string[];
@@ -103,6 +106,8 @@ export interface JobCreateBody {
   file_id: string;
   name?: string;
   paper: string;
+  /** "layers" (default) | "colors" — selects pen_map key semantics. */
+  pen_map_mode?: PenMapMode;
   pen_map: Record<string, number>;
   options: Record<string, unknown>;
 }

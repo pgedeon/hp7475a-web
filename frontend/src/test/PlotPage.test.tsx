@@ -98,7 +98,7 @@ describe("PlotPage", () => {
 
   it("prepare → WS READY → preview → confirm modal blocks start until checked", async () => {
     mockApi.uploadSvg.mockResolvedValue({ id: "f1", name: "drawing.svg", size: 100, sanitize: {} });
-    mockApi.analysis.mockResolvedValue({ layers: ["cut"], stroke_colors: ["#f00"], unsupported: [] });
+    mockApi.analysis.mockResolvedValue({ layers: ["cut", "engrave"], stroke_colors: ["#f00"], unsupported: [] });
     mockApi.createJob.mockResolvedValue({ ...JOB });
     mockApi.prepareJob.mockResolvedValue({ accepted: true });
     mockApi.jobPreview.mockResolvedValue(
@@ -117,7 +117,9 @@ describe("PlotPage", () => {
       fireEvent.click(screen.getByTestId("prepare-btn"));
     });
     expect(mockApi.createJob).toHaveBeenCalledWith(
-      expect.objectContaining({ file_id: "f1", paper: "a4", pen_map: { cut: 1 } })
+      expect.objectContaining({
+        file_id: "f1", paper: "a4", pen_map: { cut: 1, engrave: 2 }, pen_map_mode: "layers",
+      })
     );
     expect(mockApi.prepareJob).toHaveBeenCalledWith("job-1");
 
@@ -138,6 +140,84 @@ describe("PlotPage", () => {
       fireEvent.click(screen.getByTestId("confirm-start"));
     });
     expect(mockApi.startJob).toHaveBeenCalledWith("job-1");
+  });
+
+  it("defaults to By Color when ≤1 layer; toggle switches mapping source", async () => {
+    mockApi.uploadSvg.mockResolvedValue({ id: "f2", name: "flat.svg", size: 10, sanitize: {} });
+    mockApi.analysis.mockResolvedValue({ layers: ["only"], stroke_colors: ["#ff0000", "#0000ff"], unsupported: [] });
+
+    render(ui(<PlotPage />));
+    await act(async () => {
+      fireEvent.change(await screen.findByLabelText("SVG file"), {
+        target: { files: [new File(["x"], "flat.svg")] },
+      });
+    });
+
+    // 1 layer → colors are the default grouping
+    expect(screen.getByTestId("mode-colors")).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByLabelText("pen for color #ff0000")).toBeInTheDocument();
+    expect(screen.queryByLabelText("pen for layer only")).toBeNull();
+
+    // toggle to layers — same file, different rows
+    fireEvent.click(screen.getByTestId("mode-layers"));
+    expect(screen.getByTestId("mode-layers")).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByLabelText("pen for layer only")).toBeInTheDocument();
+    expect(screen.queryByLabelText("pen for color #ff0000")).toBeNull();
+
+    // toggle back — color selections were kept (separate maps per mode)
+    fireEvent.click(screen.getByTestId("mode-colors"));
+    expect(screen.getByLabelText("pen for color #ff0000")).toHaveValue("1");
+  });
+
+  it("color rows render a swatch with the stroke hex as background", async () => {
+    mockApi.uploadSvg.mockResolvedValue({ id: "f3", name: "c.svg", size: 10, sanitize: {} });
+    mockApi.analysis.mockResolvedValue({ layers: [], stroke_colors: ["#ff0000", "#0000ff"], unsupported: [] });
+
+    render(ui(<PlotPage />));
+    await act(async () => {
+      fireEvent.change(await screen.findByLabelText("SVG file"), {
+        target: { files: [new File(["x"], "c.svg")] },
+      });
+    });
+    const row = screen.getByLabelText("pen for color #0000ff").closest("tr");
+    expect(row).not.toBeNull();
+    expect(row!.querySelector(".swatch")).toHaveStyle({ background: "#0000ff" });
+    expect(screen.getAllByText("#0000ff").length).toBeGreaterThan(0);
+  });
+
+  it("job create payload carries pen_map_mode colors + color-keyed pen_map", async () => {
+    mockApi.uploadSvg.mockResolvedValue({ id: "f4", name: "colors.svg", size: 10, sanitize: {} });
+    mockApi.analysis.mockResolvedValue({ layers: [], stroke_colors: ["#ff0000", "#0000ff"], unsupported: [] });
+    mockApi.createJob.mockResolvedValue({ ...JOB, pen_map: { "#ff0000": 1, "#0000ff": 2 } });
+    mockApi.prepareJob.mockResolvedValue({ accepted: true });
+
+    render(ui(<PlotPage />));
+    await act(async () => {
+      fireEvent.change(await screen.findByLabelText("SVG file"), {
+        target: { files: [new File(["x"], "colors.svg")] },
+      });
+    });
+    await act(async () => { fireEvent.click(screen.getByTestId("prepare-btn")); });
+    expect(mockApi.createJob).toHaveBeenCalledWith(expect.objectContaining({
+      pen_map_mode: "colors",
+      pen_map: { "#ff0000": 1, "#0000ff": 2 },
+    }));
+  });
+
+  it("falls back to layer mode with a notice when stroke_colors are absent", async () => {
+    mockApi.uploadSvg.mockResolvedValue({ id: "f5", name: "layers-only.svg", size: 10, sanitize: {} });
+    // ≤1 layer defaults to colors, but no stroke_colors reported → fall back
+    mockApi.analysis.mockResolvedValue({ layers: ["solo"], stroke_colors: [], unsupported: [] });
+
+    render(ui(<PlotPage />));
+    await act(async () => {
+      fireEvent.change(await screen.findByLabelText("SVG file"), {
+        target: { files: [new File(["x"], "layers-only.svg")] },
+      });
+    });
+    expect(screen.getByTestId("color-mode-unavailable")).toHaveTextContent(/no stroke colors/i);
+    expect(screen.getByTestId("mode-layers")).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByLabelText("pen for layer solo")).toBeInTheDocument();
   });
 
   it("WS progress patches the live job row", async () => {

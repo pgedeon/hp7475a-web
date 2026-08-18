@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="120mm" height="90mm" viewBox="0 0 120 90">
+  <!-- no Inkscape layers: color-based mapping is the natural grouping -->
+  <g stroke="#ff0000" fill="none">
+    <path d="M5,5 L60,5 L60,40 Z"/>
+    <line x1="10" y1="50" x2="50" y2="50"/>
+  </g>
+  <rect x="70" y="5" width="30" height="25" fill="none" stroke="#00ff00"/>
+  <g stroke="#0000ff" fill="none">
+    <circle cx="30" cy="70" r="12"/>
+    <g>
+      <polyline points="70,70 90,70 90,85" stroke="#ffcc00"/>
+    </g>
+    <rect x="100" y="60" width="15" height="15" stroke="none"/>
+  </g>
+</svg>

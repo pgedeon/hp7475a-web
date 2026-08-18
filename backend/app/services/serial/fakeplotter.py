@@ -30,6 +30,45 @@ logger = logging.getLogger(__name__)
 
 _MOVERS = {"PA", "PR", "PU", "PD", "SP"}  # instructions that take real time
 
+_ESC_BYTE = 0x1B
+_TERM_BYTES = (0x3B, 0x3A)  # ';' ':'
+
+
+def _split_control_channel(stream: bytes) -> tuple[list[str], bytes, bytes]:
+    """Separate device-control escapes from HP-GL data in one read block.
+
+    Emulates the plotter's RS-232 handler (Prog. Manual Ch.10): escape
+    sequences are intercepted at the control level — they never enter the
+    1024-byte graphics buffer — while everything around them stays in
+    stream order. Returns (escape_tokens, graphics_bytes,
+    incomplete_escape_tail); the tail is withheld (neither buffered nor
+    dropped) until its terminator arrives in a later block.
+    """
+    tokens: list[str] = []
+    graphics = bytearray()
+    i, n = 0, len(stream)
+    while i < n:
+        j = stream.find(b"\x1b", i)
+        if j < 0:
+            graphics += stream[i:]
+            break
+        end = -1
+        for k in range(j + 2, min(n, j + 14)):
+            if stream[k] in _TERM_BYTES:
+                end = k
+                break
+        if end < 0:
+            if n - j < 14:
+                return tokens, bytes(graphics + bytearray(stream[i:j])), stream[j:]
+            # stray ESC with no terminator in range: treat as graphics byte
+            graphics += stream[i : j + 1]
+            i = j + 1
+            continue
+        graphics += stream[i:j]
+        tokens.append(stream[j : end + 1].decode("ascii", errors="replace"))
+        i = end + 1
+    return tokens, bytes(graphics), b""
+
 
 class FakeHP7475A:
     """Thread-safe pty-backed HP 7475A emulator."""
@@ -44,6 +83,7 @@ class FakeHP7475A:
         self._master = -1
         self._slave = -1
         self._reply_mode = "normal"  # normal | timeout | malformed
+        self._pending_ctl = bytearray()  # incomplete escape bytes (control ch.)
 
         # -- emulated device state (guarded by _lock) --
         self.x = 0
@@ -186,22 +226,36 @@ class FakeHP7475A:
             if not data:
                 continue
             with self._lock:
+                # RS-232 handler semantics (Prog. Manual Ch.10): device-control
+                # escapes are intercepted by the control parser BEFORE the
+                # graphics buffer — they never consume its 1024 bytes and are
+                # answered in stream order. Anything after a complete escape
+                # (and any incomplete escape tail) is control-channel data.
+                stream = bytes(self._pending_ctl) + data
+                self._pending_ctl = bytearray()
+                escapes, remainder, pending = _split_control_channel(stream)
+                self._pending_ctl = bytearray(pending)
                 occ = len(self._inbuf)
-                take = min(len(data), self._buffer_size - occ)
-                dropped = len(data) - take
+                take = min(len(remainder), self._buffer_size - occ)
+                dropped = len(remainder) - take
                 if dropped:
                     self.rs232_error = 16  # input buffer overflow (Prog. §10-29)
-                self._inbuf.extend(data[:take])
-                self.occupancy_log.append((occ, bytes(data), len(self._inbuf), dropped))
-                replies = self._answer_escapes_locked()
+                self._inbuf.extend(remainder[:take])
+                self.occupancy_log.append((occ, data, len(self._inbuf), dropped))
+                replies = [
+                    self._format_reply_locked(
+                        self._escape_reply_locked(token)
+                    )
+                    for token in escapes
+                ]
             for text in replies:
-                self._emit(text)
+                if text is not None:
+                    self._emit(text)
 
     def _answer_escapes_locked(self) -> list[str]:
-        """Extract complete escape sequences and answer them immediately
-        (Prog. Manual Ch.10: device-control escapes are RS-232 level, not
-        buffered HP-GL — ESC .B must reflect occupancy *now*). Caller
-        holds the lock."""
+        """Legacy in-buffer escape extraction — with control-channel
+        splitting at read time this is a no-op safety net (kept for direct
+        _inbuf injection in tests). Caller holds the lock."""
         out: list[str] = []
         esc = protocol.ESC.encode("ascii")
         while True:
@@ -226,6 +280,17 @@ class FakeHP7475A:
                 reply = "##garbage##"
             out.append(reply + protocol.OUTPUT_TERMINATOR)
         return out
+
+    # executor loop unchanged
+    def _format_reply_locked(self, raw: str | None) -> str | None:
+        """Apply fault modes to one control reply; None = stay silent."""
+        if raw is None:
+            return None
+        if self._reply_mode == "timeout":
+            return None
+        if self._reply_mode == "malformed":
+            return "##garbage##"
+        return raw + protocol.OUTPUT_TERMINATOR
 
     def _escape_reply_locked(self, token: str) -> str | None:
         """Reply for one escape token; free space counts bytes still

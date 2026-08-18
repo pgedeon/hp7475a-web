@@ -48,6 +48,13 @@ pool deadlocks on some WSL2 hosts.
   raw WS log), `Settings` (stream view + custom JSON editor).
 - `src/components/` — `StatusBadge`, `PenMap`, `Modal`, `Progress`, `Toast`,
   `PagePreview` (client-side SVG re-sanitize before inline render).
+- Pen mapping modes: **By Layer** (Inkscape layer names) or **By Color**
+  (one row per `analysis.stroke_colors` hex — swatch shows the exact stroke
+  color; useful for SVGs without Inkscape layers). Default is By Layer when
+  the file has >1 layer, else By Color; files reporting no stroke colors fall
+  back to layer mapping with a notice. Disabled rows are excluded from
+  `pen_map` (don't plot). The create-job payload sends
+  `pen_map_mode: "layers" | "colors"` alongside the keyed `pen_map`.
 - `src/test/` — vitest + @testing-library; `fakews.ts` is the WS test double.
 
 ## Conventions

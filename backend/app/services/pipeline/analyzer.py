@@ -100,15 +100,32 @@ def analyze_svg(clean_bytes: bytes) -> SvgAnalysis:
 # --------------------------------------------------------------------------
 
 def _stroke_colors(root: ET.Element) -> list[str]:
-    """Ordered first-seen stroke values (excluding 'none')."""
+    """Ordered first-seen EFFECTIVE stroke values (excluding 'none').
+
+    Inheritance-aware: a drawable without its own stroke inherits the
+    nearest ancestor stroke (explicit ``stroke="none"`` overrides).
+    Shares resolution with colormap.effective_stroke so the UI color list
+    and pipeline color grouping can never diverge.
+    """
+    from app.services.pipeline.colormap import effective_stroke
+
     seen: list[str] = []
-    for el in root.iter():
-        stroke = el.get("stroke")
-        if stroke is None:
-            continue
-        value = stroke.strip().lower()
-        if value and value != "none" and value not in seen:
-            seen.append(value)
+
+    def walk(el: ET.Element, stack: list[ET.Element]) -> None:
+        stack.append(el)
+        tag = el.tag.split("}")[-1]
+        if tag in {
+            "path", "line", "rect", "circle", "ellipse", "polyline", "polygon"
+        }:
+            color = effective_stroke(stack)
+            if color is not None and color not in seen:
+                seen.append(color)
+        for child in el:
+            walk(child, stack)
+        stack.pop()
+
+    for child in root:
+        walk(child, [root])
     return seen
 
 

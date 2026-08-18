@@ -270,6 +270,7 @@ class JobCreateBody(BaseModel):
     name: str = ""
     paper: str = "a4"
     pen_map: dict[str, int] = Field(default_factory=dict)
+    pen_map_mode: str = "layers"  # "layers" | "colors" (goal 3e598c6e)
     options: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -278,6 +279,8 @@ async def create_job(body: JobCreateBody, request: Request) -> dict:
     state = get_state(request)
     if body.paper not in PAPERS:
         raise HTTPException(422, f"paper must be one of {sorted(PAPERS)}")
+    if body.pen_map_mode not in ("layers", "colors"):
+        raise HTTPException(422, "pen_map_mode must be 'layers' or 'colors'")
     try:
         meta = state.files.get(body.file_id)
     except FileNotFoundError:
@@ -287,7 +290,8 @@ async def create_job(body: JobCreateBody, request: Request) -> dict:
             raise HTTPException(422, f"pen for layer {layer!r} must be 1..6")
     job = state.jobs.create(
         name=body.name or meta.name, file_id=body.file_id, paper=body.paper,
-        pen_map=body.pen_map, options=body.options,
+        pen_map=body.pen_map,
+        options={**body.options, "pen_map_mode": body.pen_map_mode},
     )
     return job.to_dict()
 
@@ -337,10 +341,15 @@ async def prepare_job(job_id: str, request: Request) -> dict:
             raise HTTPException(404, "source file vanished")
         if meta.kind == "svg":
             try:
-                result = run_pipeline(
-                    state.files.get(job.file_id).stored_path, job.paper,
-                    PipelineOptions.from_dict(job.options), job.pen_map,
-                )
+                opts = PipelineOptions.from_dict(job.options)
+                if job.options.get("pen_map_mode") == "colors":
+                    from app.services.pipeline.vpy import run_pipeline_color
+
+                    result = run_pipeline_color(
+                        meta.stored_path, job.paper, opts, job.pen_map,
+                    )
+                else:
+                    result = run_pipeline(meta.stored_path, job.paper, opts, job.pen_map)
             except Exception as exc:
                 raise HTTPException(422, f"pipeline failed: {exc}")
             preview_dir = state.settings.data_dir / "previews"

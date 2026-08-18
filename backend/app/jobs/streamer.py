@@ -45,29 +45,28 @@ class TransportLike(Protocol):
 def split_chunk(payload: str, start: int, max_bytes: int) -> int:
     """Return end index (exclusive) of the next chunk starting at `start`.
 
-    Chunk never exceeds max_bytes and always ends just past a ';' instruction
-    terminator when one exists within the window (property-tested)."""
-    window = payload[start : start + max_bytes]
-    cut = window.rfind(";")
-    if cut == -1:
-        # No terminator in window: send whole window but never split a
-        # trailing partial instruction — find safe cut at last boundary if
-        # the remainder continues mid-instruction.
-        if start + max_bytes >= len(payload):
-            return len(payload)
-        # Search wider for the next ';' to know where the instruction ends;
-        # if the instruction is longer than max_bytes we must still split it
-        # (validator caps instruction sizes well below chunk size, so this
-        # is a defensive path that raises rather than corrupting).
-        next_cut = payload.find(";", start)
-        if next_cut == -1:
-            return len(payload)
-        if next_cut - start + 1 <= max_bytes * 4:  # unreasonably long guard
-            raise StreamerFatal(
-                f"Instruction longer than 4×chunk size at offset {start}; refusing to split"
-            )
-        return start + max_bytes
-    return start + cut + 1
+    Prefer the last ';' within the window; if none fits, extend to the NEXT
+    instruction boundary (a whole instruction beats a split one — the
+    plotter buffer tolerates it as long as it fits). Returns -1 when no
+    boundary-aligned chunk fits within *max_bytes* (caller waits for the
+    buffer to drain). Raises StreamerFatal for instructions that could
+    never fit the 1024-byte plotter buffer at all."""
+    window_end = min(start + max_bytes, len(payload))
+    cut = payload.rfind(";", start, window_end)
+    if cut != -1:
+        return cut + 1
+    next_cut = payload.find(";", window_end)
+    end = len(payload) if next_cut == -1 else next_cut + 1
+    if end == start:
+        return -1
+    if end - start > protocol.INPUT_BUFFER_BYTES:
+        raise StreamerFatal(
+            f"Instruction at offset {start} is {end - start}B — longer than "
+            f"the {protocol.INPUT_BUFFER_BYTES}B plotter buffer; refusing"
+        )
+    if end - start > max_bytes:
+        return -1  # whole instruction doesn't fit current budget: wait
+    return end
 
 
 class ChunkedStreamer:
@@ -128,6 +127,20 @@ class ChunkedStreamer:
                 continue
             zero_waited = 0.0
             end = split_chunk(text, sent, budget)
+            if end == -1:
+                # no boundary-aligned instruction fits free−margin; allow a
+                # whole instruction up to FULL free space (still boundary-
+                # aligned; margin is headroom, never correctness)
+                end = split_chunk(text, sent, max(1, free))
+            if end == -1:
+                # instruction larger than free space: wait for drain
+                if zero_waited >= self._zero_max_wait:
+                    raise StreamerFatal(
+                        f"plotter buffer stayed full for {zero_waited:.0f}s; aborting"
+                    )
+                threading.Event().wait(self._zero_poll)
+                zero_waited += self._zero_poll
+                continue
             chunk = data[sent:end]
             try:
                 self._transport.write(chunk)  # transport guarantees full write
