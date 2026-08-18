@@ -86,6 +86,9 @@ class FakeDriver:
     def initialize_device(self):
         return {}
 
+    def complete_plot(self, timeout=600.0, **kwargs):
+        return (0.0, 0.0, False)
+
     def await_completion(self, timeout=600.0):
         return True
 

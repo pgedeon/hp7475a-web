@@ -119,7 +119,23 @@ async def device_status(request: Request) -> dict:
         status = state.devices.status()
     except Exception as exc:
         status = {"error": str(exc)}
-    return {**info, "status": status}
+    result = {**info, "status": status}
+    try:
+        result["buffer_free"] = state.devices.buffer_space()
+    except Exception:
+        pass  # optional enrichment; monitor UI renders when present
+    return result
+
+
+@router.get("/device/hard-clip")
+async def device_hard_clip(request: Request) -> dict:
+    return _device_call(request, get_state(request).devices.hard_clip_limits)
+
+
+@router.get("/device/buffer")
+async def device_buffer(request: Request) -> dict:
+    value = _device_call(request, get_state(request).devices.buffer_space)
+    return {"free": value}
 
 
 @router.get("/device/error")

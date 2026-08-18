@@ -82,6 +82,10 @@ HPGL_OUTPUT_STATUS = "OS;"
 #: Output P1/P2. Prog. Manual Ch.2.
 HPGL_OUTPUT_P1_P2 = "OP;"
 
+#: Output hard-clip limits — replies "xmin,ymin,xmax,ymax" in plotter
+#: units; reveals the DIP-switch paper configuration. Prog. Manual Ch.2.
+HPGL_OUTPUT_HARD_CLIP = "OH;"
+
 # ---------------------------------------------------------------------------
 # RS-232-C device-control (escape) instructions
 # Syntax: ESC . <letter> [params] : — parameterized forms end with ':'.

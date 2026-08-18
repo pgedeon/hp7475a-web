@@ -69,7 +69,7 @@ describe("DevicePage wizard", () => {
     expect(await screen.findByTestId("ports-empty")).toHaveTextContent(/No serial ports found/);
   });
 
-  it("step 1→2→3: settings default 9600 8N1, connect + identify verify 7475A", async () => {
+  it("step 1→2: settings default 9600 8N1, connect → connected view + identify 7475A", async () => {
     mockApi.deviceStatus
       .mockResolvedValueOnce({ connected: false, port: null, settings: null, status: null })
       .mockResolvedValue({ connected: true, port: "/dev/ttyUSB0", settings: { baudrate: 9600, bytesize: 8, parity: "N", stopbits: 1 }, status: { status: 16 } });
@@ -85,14 +85,17 @@ describe("DevicePage wizard", () => {
     await act(async () => { fireEvent.click(await screen.findByTestId("refresh-ports")); });
     fireEvent.click(screen.getByLabelText(/\/dev\/ttyUSB0/)); // radio
     fireEvent.click(screen.getByText("Next: serial settings"));
-    expect(screen.getByText(/Serial settings/)).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /Serial settings/ })).toBeInTheDocument();
 
     await act(async () => { fireEvent.click(screen.getByTestId("connect-btn")); });
     expect(mockApi.connect).toHaveBeenCalledWith({
       port: "/dev/ttyUSB0", baudrate: 9600, bytesize: 8, parity: "N", stopbits: 1,
     });
+    // connect succeeded → wizard collapses into the connected view
+    expect(await screen.findByTestId("device-connected")).toHaveTextContent("9600 8N1");
 
     await act(async () => { fireEvent.click(screen.getByTestId("identify-btn")); });
-    expect(await screen.findByText(/Paper check/)).toBeInTheDocument(); // advanced to step 4
+    expect(mockApi.identify).toHaveBeenCalledTimes(1);
+    expect(await screen.findByText(/Identified: 7475A/)).toBeInTheDocument();
   });
 });

@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from typing import Callable, Protocol
 
 from app.services.serial import protocol
+from app.services.serial.transport import DeviceDisconnected
 
 logger = logging.getLogger(__name__)
 
@@ -129,13 +130,11 @@ class ChunkedStreamer:
             end = split_chunk(text, sent, budget)
             chunk = data[sent:end]
             try:
-                written = self._transport.write(chunk)
-            except Exception as exc:  # transport raises typed errors; fatal
+                self._transport.write(chunk)  # transport guarantees full write
+            except DeviceDisconnected:
+                raise
+            except Exception as exc:
                 raise StreamerFatal(f"write failed at byte {sent}: {exc}") from exc
-            if written != len(chunk):
-                raise StreamerFatal(
-                    f"partial write {written}/{len(chunk)} at byte {sent}"
-                )
             sent = end
             self._report(sent, total, free)
         return sent
@@ -158,6 +157,8 @@ class ChunkedStreamer:
                     )
                 return value
             except StreamerFatal:
+                raise
+            except DeviceDisconnected:
                 raise
             except Exception as exc:
                 last_exc = exc

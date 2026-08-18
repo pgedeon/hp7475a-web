@@ -108,6 +108,20 @@ class DeviceManager:
     def position(self) -> dict:
         return self._require_driver().position()
 
+    def hard_clip_limits(self) -> dict:
+        xmin, ymin, xmax, ymax = self._require_driver().hard_clip_limits()
+        from app.services.serial.paper import PAPERS
+
+        match = None
+        for name, p in PAPERS.items():
+            if (p.x_range[0], p.y_range[0], p.x_range[1], p.y_range[1]) == (xmin, ymin, xmax, ymax):
+                match = name
+                break
+        return {"limits": [xmin, ymin, xmax, ymax], "paper": match}
+
+    def buffer_space(self) -> int:
+        return self._require_driver().buffer_space()
+
     def select_pen(self, pen: int) -> dict:
         return self._require_driver().select_pen(pen)
 

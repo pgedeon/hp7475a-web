@@ -16,13 +16,17 @@ from __future__ import annotations
 
 import logging
 import time
+
+import serial
 from dataclasses import dataclass
 
 from app.services.serial import paper as paper_mod
 from app.services.serial import protocol
 from app.services.serial.responder import ResponderError, StatusReport
 from app.services.serial.transport import (
+    DeviceDisconnected,
     SerialTransport,
+    TransportMalformed,
     TransportSettings,
     TransportTimeout,
 )
@@ -80,6 +84,11 @@ class HP7475ADevice:
         return self._transport.is_open
 
     @property
+    def transport(self) -> "SerialTransport":
+        """The underlying transport (used by the job streamer)."""
+        return self._transport
+
+    @property
     def paper(self) -> paper_mod.Paper:
         return self._paper
 
@@ -132,6 +141,24 @@ class HP7475ADevice:
         """OA; → (x, y, pen_down) in plotter units (Prog. Manual §7-2)."""
         return self._query(protocol.HPGL_OUTPUT_ACTUAL_POSITION,
                            parse=self._responder().parse_position)
+
+    def hard_clip_limits(self) -> tuple[int, int, int, int]:
+        """OH; → (xmin, ymin, xmax, ymax) plotter units (Prog. Manual Ch.2).
+
+        Reveals the paper size configured via the plotter's rear DIP
+        switches — lets the UI verify the loaded sheet matches the job.
+        """
+        line = self._query(protocol.HPGL_OUTPUT_HARD_CLIP, parse=None)
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) != 4 or not all(p.lstrip("-").isdigit() for p in parts):
+            raise TransportMalformed(f"bad OH reply: {line!r}")
+        xmin, ymin, xmax, ymax = (int(p) for p in parts)
+        return xmin, ymin, xmax, ymax
+
+    def buffer_space(self) -> int:
+        """ESC .B; → free input-buffer bytes 0..1024 (Prog. Manual §10-28)."""
+        return self._query(protocol.ESC_OUTPUT_BUFFER_SPACE,
+                           parse=self._responder().parse_buffer_space)
 
     def errors(self) -> tuple[int, str]:
         """OE; → (hpgl_error_code, meaning); reading clears the error
@@ -203,6 +230,44 @@ class HP7475ADevice:
         self._transport.write(protocol.HPGL_INIT.encode())
 
     # -- completion (hardware-notes §5) ----------------------------------------
+
+    def complete_plot(self, timeout: float, on_status=None,
+                      poll_interval: float = 1.0) -> tuple[float, float, bool]:
+        """Queue an OA; sentinel AFTER the streamed job payload and block
+        until its reply arrives — the parse-order completion proof
+        (hardware-notes §5; Prog. Manual Ch.7/10).
+
+        The sentinel reply is *recognized by shape* (X,Y,P position line),
+        not by value: the caller cannot know the final position in advance.
+        Optional OS; status polls are injected between reads; their replies
+        queue behind the sentinel in parse order.
+
+        Returns (x, y, pen_down) from the sentinel reply.
+        Raises TransportTimeout on deadline; DeviceDisconnected on loss.
+        """
+        self._transport.write(protocol.HPGL_OUTPUT_ACTUAL_POSITION.encode())
+        responder = self._responder()
+        deadline = time.monotonic() + timeout
+        next_poll = time.monotonic() + poll_interval if on_status is not None else None
+        while True:
+            now = time.monotonic()
+            if now >= deadline:
+                raise TransportTimeout(
+                    f"completion OA reply not received within {timeout}s"
+                )
+            if next_poll is not None and now >= next_poll:
+                self._transport.write(protocol.HPGL_OUTPUT_STATUS.encode())
+                next_poll = now + poll_interval
+            try:
+                line = responder.read_line(timeout=0.5)
+            except serial.SerialException as exc:
+                raise DeviceDisconnected(f"read failed: {exc}") from exc
+            except ResponderError:
+                continue  # transient; deadline re-checked above
+            try:
+                return responder.parse_position(line)
+            except ResponderError:
+                self._maybe_status(line, on_status)
 
     def await_completion(self, sentinel_reply: str, timeout: float,
                          on_status=None, poll_interval: float = 1.0) -> None:

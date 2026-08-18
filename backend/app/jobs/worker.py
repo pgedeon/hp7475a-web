@@ -18,6 +18,7 @@ from typing import Optional
 from app.jobs.models import IllegalTransition, Job, JobState
 from app.jobs.store import JobNotFound, JobStore
 from app.jobs.streamer import ChunkedStreamer, StreamInterrupted, StreamerFatal
+from app.services.serial.transport import DeviceDisconnected
 
 logger = logging.getLogger(__name__)
 
@@ -164,7 +165,7 @@ class HardwareWorker:
             self._stream_with_pause_support(streamer, payload, job_id)
             self._store.set_state(job_id, JobState.PLOTTING)  # all bytes buffered/accepted
             self._store.set_state(job_id, JobState.COMPLETING)
-            driver.await_completion(timeout=self._settings.completion_timeout_s)
+            driver.complete_plot(timeout=self._settings.completion_timeout_s)
             self._store.set_state(job_id, JobState.COMPLETED)
             self._store.prune_history()
         except StreamInterrupted as exc:
@@ -180,7 +181,7 @@ class HardwareWorker:
                 self._store.set_state(job_id, JobState.FAILED, error=reason)
         except StreamerFatal as exc:
             self._store.set_state(job_id, JobState.FAILED, error=str(exc))
-        except DeviceDisconnectedError:
+        except DeviceDisconnected:
             self._store.set_state(job_id, JobState.DISCONNECTED, error="device disconnected")
         except Exception as exc:
             self._store.set_state(job_id, JobState.FAILED, error=f"{type(exc).__name__}: {exc}")
@@ -199,7 +200,7 @@ class HardwareWorker:
                     should_run=lambda: not self._stop.is_set(),
                 )
                 outcome["ok"] = True
-            except (StreamInterrupted, StreamerFatal) as exc:
+            except (StreamInterrupted, StreamerFatal, DeviceDisconnected) as exc:
                 outcome["exc"] = exc
             except Exception as exc:  # unexpected → fatal classification
                 outcome["exc"] = StreamerFatal(str(exc))
@@ -234,7 +235,7 @@ class HardwareWorker:
             self._stream_with_pause_support(streamer, payload, job_id)
             self._store.set_state(job_id, JobState.PLOTTING)
             self._store.set_state(job_id, JobState.COMPLETING)
-            driver.await_completion(timeout=self._settings.completion_timeout_s)
+            driver.complete_plot(timeout=self._settings.completion_timeout_s)
             self._store.set_state(job_id, JobState.COMPLETED)
         except StreamInterrupted as exc:
             reason = str(exc)
@@ -256,8 +257,3 @@ class HardwareWorker:
             driver.park()  # PU corner + SP0 after motion drains
         except Exception:
             logger.exception("device reset failed")
-
-
-class DeviceDisconnectedError(RuntimeError):
-    """Import shim — real class lives in transport lane; kept local to avoid
-    importing child-lane modules before they land."""

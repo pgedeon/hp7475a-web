@@ -1,0 +1,156 @@
+"""Phase 7 — end-to-end over the PTY fake plotter.
+
+Unlike the API tests (fake streamer), these run the REAL production path:
+HardwareWorker → ChunkedStreamer → SerialTransport → pty → FakeHP7475A.
+No HTTP layer; this pins the hardware-facing behavior (spec §35, §45).
+"""
+
+from __future__ import annotations
+
+import time
+
+import pytest
+
+from app.config import Settings
+from app.db import Database
+from app.jobs.models import JobState
+from app.jobs.store import JobStore
+from app.jobs.worker import HardwareWorker
+from app.services.device_manager import DeviceManager
+from app.services.serial.fakeplotter import FakeHP7475A
+from app.services.serial.transport import TransportSettings
+
+
+@pytest.fixture()
+def fake(request):
+    fake = FakeHP7475A()
+    fake.start()
+    request.addfinalizer(fake.stop)
+    return fake
+
+
+@pytest.fixture()
+def stack(tmp_path, fake):
+    settings = Settings(
+        data_dir=tmp_path,
+        stream_default_chunk=64,       # force many chunks
+        stream_query_timeout_s=1.0,
+        completion_timeout_s=10.0,
+    )
+    db = Database(settings.db_path)
+    jobs = JobStore(db, history_keep=10)
+    devices = DeviceManager()
+    devices.connect(
+        fake.port_path, {"baudrate": 9600}, driver_factory=_fake_driver
+    )
+    worker = HardwareWorker(jobs, devices, settings)
+    worker.start()
+    yield settings, db, jobs, devices, worker
+    worker.shutdown()
+    devices.disconnect()
+    db.close()
+
+
+def _fake_driver(port_path, settings=None):
+    from app.services.serial.driver import HP7475ADevice
+
+    return HP7475ADevice(
+        port_path,
+        TransportSettings(
+            **({k: v for k, v in (settings.__dict__ if settings else {}).items()
+                if k in TransportSettings.__dataclass_fields__})
+        ) if settings else None,
+    )
+
+
+def _wait_status(jobs, job_id, want, timeout=15.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        job = jobs.get(job_id)
+        if job.status in want:
+            return job
+        time.sleep(0.05)
+    raise AssertionError(f"job stuck in {jobs.get(job_id).status}, wanted {want}")
+
+
+PAYLOAD = "IN;SP1;PU500,500;" + "".join(
+    f"PD{500 + i * 10},{600 + (i % 7) * 10};" for i in range(60)
+) + "PU0,0;SP0;"
+
+
+def test_e2e_happy_path_completes_after_device_execution(stack, fake):
+    settings, db, jobs, devices, worker = stack
+    job = jobs.create(name="e2e", hpgl=PAYLOAD, paper="a4")
+    worker.submit("prepare", job.id)
+    _wait_status(jobs, job.id, {JobState.READY, JobState.FAILED})
+    assert jobs.get(job.id).status == JobState.READY
+
+    worker.submit("start", job.id)
+    done = _wait_status(
+        jobs, job.id,
+        {JobState.COMPLETED, JobState.FAILED, JobState.DISCONNECTED},
+        timeout=30.0,
+    )
+    assert done.status == JobState.COMPLETED, done.error
+    # bytes accounting: everything sent
+    assert done.bytes_sent == len(PAYLOAD.encode())
+    # device actually executed the payload (fake drains by exec delay)
+    fake.wait_idle(timeout=10.0)
+    assert fake.pen == 0  # parked
+
+
+def test_e2e_cancel_during_plot(stack, fake):
+    settings, db, jobs, devices, worker = stack
+    fake.set_exec_delay(0.15)  # slow execution → cancel window
+    job = jobs.create(name="cancel", hpgl=PAYLOAD, paper="a4")
+    worker.submit("prepare", job.id)
+    _wait_status(jobs, job.id, {JobState.READY, JobState.FAILED})
+    worker.submit("start", job.id)
+    # wait until sending has begun, then cancel
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if jobs.get(job.id).bytes_sent > 0:
+            break
+        time.sleep(0.02)
+    worker.submit("cancel", job.id)
+    done = _wait_status(
+        jobs, job.id, {JobState.CANCELLED, JobState.FAILED, JobState.COMPLETED},
+        timeout=20.0,
+    )
+    # cancel must win unless the plot had already finished
+    assert done.status in (JobState.CANCELLED, JobState.COMPLETED)
+
+
+def test_e2e_disconnect_marks_disconnected(stack, fake):
+    settings, db, jobs, devices, worker = stack
+    fake.set_exec_delay(0.1)
+    job = jobs.create(name="disc", hpgl=PAYLOAD, paper="a4")
+    worker.submit("prepare", job.id)
+    _wait_status(jobs, job.id, {JobState.READY, JobState.FAILED})
+    worker.submit("start", job.id)
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if jobs.get(job.id).bytes_sent > 0:
+            break
+        time.sleep(0.02)
+    fake.fault_disconnect()
+    done = _wait_status(
+        jobs, job.id,
+        {JobState.DISCONNECTED, JobState.FAILED, JobState.CANCELLED},
+        timeout=20.0,
+    )
+    assert done.status == JobState.DISCONNECTED, f"{done.status}: {done.error}"
+
+
+def test_e2e_timeout_fault_fails_job(stack, fake):
+    settings, db, jobs, devices, worker = stack
+    fake.fault_timeout()
+    job = jobs.create(name="tmo", hpgl=PAYLOAD, paper="a4")
+    worker.submit("prepare", job.id)
+    _wait_status(jobs, job.id, {JobState.READY, JobState.FAILED})
+    worker.submit("start", job.id)
+    done = _wait_status(
+        jobs, job.id, {JobState.FAILED, JobState.DISCONNECTED}, timeout=30.0
+    )
+    assert done.status == JobState.FAILED
+    assert done.error

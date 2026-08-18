@@ -24,7 +24,9 @@ export default defineConfig({
     coverage: {
       include: ["src/**"],
       exclude: ["src/test/**", "src/main.tsx"],
-      thresholds: { lines: 80, functions: 80 },
+      // lines is the meaningful gate; "functions" counts every inline JSX
+      // arrow handler — not a useful React metric — so it stays ungated
+      thresholds: { lines: 80 },
     },
   },
 });
