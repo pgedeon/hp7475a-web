@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100mm" height="80mm" viewBox="0 0 100 80">
+  <!-- coordinates far beyond any hard-clip range (max ~16640u ≈ 414mm) -->
+  <path d="M -5000,-4000 L 90000,70000" stroke="black" fill="none"/>
+  <rect x="40000" y="30000" width="5000" height="4000" fill="none" stroke="black"/>
+</svg>

@@ -137,6 +137,39 @@ class FakeHP7475A:
         with self._lock:
             return self._reply_mode
 
+    # -- synchronization helpers for tests ------------------------------------
+
+    def wait_received(self, n: int, timeout: float = 5.0) -> bool:
+        """Wait until >= *n* bytes have arrived from the host."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with self._lock:
+                rx = sum(len(entry[1]) for entry in self.occupancy_log)
+            if rx >= n:
+                return True
+            time.sleep(0.005)
+        return False
+
+    def wait_idle(self, quiet: float = 0.15, timeout: float = 5.0) -> bool:
+        """Wait until arrivals stop AND the input buffer is empty (all
+        queued instructions executed). Guards the arrival race a bare
+        ``occupancy == 0`` check misses."""
+        deadline = time.monotonic() + timeout
+        last_rx, quiet_start = -1, None
+        while time.monotonic() < deadline:
+            with self._lock:
+                rx = sum(len(entry[1]) for entry in self.occupancy_log)
+                busy = bool(self._inbuf)
+            if rx != last_rx:
+                last_rx, quiet_start = rx, None
+            if not busy:
+                if quiet_start is None:
+                    quiet_start = time.monotonic()
+                elif time.monotonic() - quiet_start >= quiet:
+                    return True
+            time.sleep(0.01)
+        return False
+
     # -- threads --------------------------------------------------------------
 
     def _reader_loop(self) -> None:
@@ -160,6 +193,49 @@ class FakeHP7475A:
                     self.rs232_error = 16  # input buffer overflow (Prog. §10-29)
                 self._inbuf.extend(data[:take])
                 self.occupancy_log.append((occ, bytes(data), len(self._inbuf), dropped))
+                replies = self._answer_escapes_locked()
+            for text in replies:
+                self._emit(text)
+
+    def _answer_escapes_locked(self) -> list[str]:
+        """Extract complete escape sequences and answer them immediately
+        (Prog. Manual Ch.10: device-control escapes are RS-232 level, not
+        buffered HP-GL — ESC .B must reflect occupancy *now*). Caller
+        holds the lock."""
+        out: list[str] = []
+        esc = protocol.ESC.encode("ascii")
+        while True:
+            i = self._inbuf.find(esc)
+            if i < 0:
+                break
+            end = -1
+            for k in range(i + 2, min(len(self._inbuf), i + 14)):
+                if self._inbuf[k : k + 1] in (b";", b":"):
+                    end = k
+                    break
+            if end < 0:
+                break  # incomplete escape — wait for the rest
+            token = bytes(self._inbuf[i : end + 1]).decode("ascii", errors="replace")
+            del self._inbuf[i : end + 1]
+            reply = self._escape_reply_locked(token)
+            if reply is None:
+                continue
+            if self._reply_mode == "timeout":
+                continue
+            if self._reply_mode == "malformed":
+                reply = "##garbage##"
+            out.append(reply + protocol.OUTPUT_TERMINATOR)
+        return out
+
+    def _escape_reply_locked(self, token: str) -> str | None:
+        """Reply for one escape token; free space counts bytes still
+        queued (the token itself is already out of the buffer)."""
+        if token.startswith(protocol.ESC_OUTPUT_BUFFER_SPACE.rstrip(";")):
+            return str(max(0, self._buffer_size - len(self._inbuf)))
+        if token.startswith(protocol.ESC_OUTPUT_EXTENDED_ERROR.rstrip(";")):
+            code, self.rs232_error = self.rs232_error, 0  # ESC .E clears
+            return str(code)
+        return None  # other escapes acknowledged by silence
 
     def _executor_loop(self) -> None:
         """Pops one complete instruction at a time, executing it and replying
@@ -204,8 +280,6 @@ class FakeHP7475A:
         """Execute one instruction token. Returns (is_motion, reply)."""
         with self._lock:
             self.commands.append(token)
-            if token.startswith(protocol.ESC):
-                return False, self._execute_escape(token)
             mnem = token[:2].upper()
             params = token[2:].rstrip(";").strip()
             reply: str | None = None
@@ -247,17 +321,6 @@ class FakeHP7475A:
                 self.hpgl_error = 1  # instruction not recognized
             return is_motion, reply
 
-    def _execute_escape(self, token: str) -> str | None:
-        """Answer escape device-control instructions (Prog. Manual Ch.10).
-        Caller holds the lock; the token's bytes are already out of the
-        buffer, so free space is buffer minus what remains queued."""
-        if token.startswith(protocol.ESC_OUTPUT_BUFFER_SPACE.rstrip(";")):
-            return str(max(0, self._buffer_size - len(self._inbuf)))
-        if token.startswith(protocol.ESC_OUTPUT_EXTENDED_ERROR.rstrip(";")):
-            code, self.rs232_error = self.rs232_error, 0  # ESC .E clears
-            return str(code)
-        return None  # other escapes acknowledged by silence
-
     def _move(self, params: str, relative: bool) -> None:
         """Apply PU/PD/PA/PR coordinate lists (last pair wins), clamped to
         the hard-clip limits. Caller holds the lock."""
@@ -274,7 +337,7 @@ class FakeHP7475A:
         x, y = nums[-2], nums[-1]
         if relative:
             x, y = self.x + x, self.y + y
-        xmin, xmax, ymin, ymax = self.hard_clip
+        xmin, ymin, xmax, ymax = self.hard_clip
         self.x = min(max(x, xmin), xmax)
         self.y = min(max(y, ymin), ymax)
         self.commanded = (self.x, self.y)

@@ -1,0 +1,4 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400mm" height="300mm" viewBox="0 0 400 300">
+  <!-- 380x272mm content: fits A3 only (ANSI B avail height 269.4mm excludes it) -->
+  <rect x="10" y="10" width="380" height="272" fill="none" stroke="black"/>
+</svg>

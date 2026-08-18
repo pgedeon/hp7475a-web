@@ -201,13 +201,13 @@ async def upload_hpgl(request: Request, file: UploadFile = File(...)) -> dict:
         raise HTTPException(422, "HP-GL must be ASCII")
     validation = validate_hpgl(text, None)
     if validation.errors:
-        raise HTTPException(422, {"message": "HP-GL rejected", "validation": validation})
+        raise HTTPException(422, {"message": "HP-GL rejected", "validation": {"errors": validation.errors, "warnings": validation.warnings}})
     meta = state.files.save(
         kind="hpgl", name=file.filename or "upload.hpgl", content=raw,
-        extra={"validation": validation},
+        extra={"validation": {"errors": validation.errors, "warnings": validation.warnings}},
     )
     return {"id": meta.id, "name": meta.name, "size": meta.size_bytes,
-            "validation": validation}
+            "validation": {"errors": validation.errors, "warnings": validation.warnings}}
 
 
 @router.get("/files/{file_id}/analysis")
@@ -324,6 +324,14 @@ async def prepare_job(job_id: str, request: Request) -> dict:
             state.jobs.update(job_id, hpgl=result.hpgl,
                               stats={"pipeline": result.stats,
                                      "preview": str(preview_path)})
+        elif meta.kind == "hpgl":
+            payload = state.files.read_bytes(job.file_id).decode("ascii")
+            from app.services.pipeline.validator import validate_hpgl as _vh
+            from app.services.serial.paper import get_paper as _gp
+            vr = _vh(payload, _gp(job.paper))
+            if vr.errors:
+                raise HTTPException(422, {"message": "stored HP-GL failed re-validation for this paper", "validation": {"errors": vr.errors, "warnings": vr.warnings}})
+            state.jobs.update(job_id, hpgl=payload)
     return _job_command(request, job_id, WorkerCommand.PREPARE)
 
 

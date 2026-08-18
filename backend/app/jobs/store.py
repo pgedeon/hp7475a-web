@@ -107,7 +107,7 @@ class JobStore:
                 "UPDATE jobs SET name=?, paper=?, pen_map=?, options=?, hpgl=?,"
                 " bytes_total=?, bytes_sent=?, stats=?, file_id=?, updated_at=? WHERE id=?",
                 (
-                    job.name, _dumps(job.pen_map), _dumps(job.options), job.hpgl,
+                    job.name, job.paper, _dumps(job.pen_map), _dumps(job.options), job.hpgl,
                     job.bytes_total, job.bytes_sent, _dumps(job.stats), job.file_id,
                     job.updated_at, job.id,
                 ),

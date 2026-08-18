@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" width="100mm" height="80mm" viewBox="0 0 100 80">
+  <!-- 3 Inkscape layers, 3 stroke colors, rect / circle / line / path -->
+  <g inkscape:groupmode="layer" inkscape:label="Layer 1" id="l1" stroke="#ff0000" stroke-width="0.5" fill="none">
+    <rect x="10" y="10" width="20" height="10"/>
+  </g>
+  <g inkscape:groupmode="layer" inkscape:label="Layer 2" id="l2" stroke="#0000ff" stroke-width="0.5" fill="none">
+    <circle cx="50" cy="40" r="8"/>
+  </g>
+  <g inkscape:groupmode="layer" inkscape:label="Layer 3" id="l3" stroke="#00aa00" stroke-width="0.5" fill="none">
+    <line x1="60" y1="60" x2="90" y2="70"/>
+    <path d="M 62,72 L 88,62"/>
+  </g>
+</svg>

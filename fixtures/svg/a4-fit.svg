@@ -1,0 +1,4 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="280mm" height="195mm" viewBox="0 0 280 195">
+  <!-- 280x195mm: fits A4 landscape hard clip with 5mm margin (269.4x195 would not, but orientation swap does) -->
+  <rect x="0" y="0" width="280" height="195" fill="none" stroke="black"/>
+</svg>

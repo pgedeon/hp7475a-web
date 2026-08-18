@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="100mm" height="80mm" viewBox="0 0 100 80">
+  <defs><rect id="src" width="10" height="10"/></defs>
+  <use xlink:href="http://evil.example/remote.svg#frag" x="10" y="10"/>
+  <use xlink:href="#src" x="30" y="30"/>
+  <rect x="60" y="60" width="10" height="5" fill="none" stroke="black"/>
+</svg>

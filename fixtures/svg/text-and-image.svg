@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100mm" height="80mm" viewBox="0 0 100 80">
+  <!-- unsupported content: text + raster + filter + gradient fill + marker + clip -->
+  <text x="10" y="20" font-size="8">hello plotter</text>
+  <image x="30" y="30" width="30" height="20" href="data:image/png;base64,iVBORw0KGgo="/>
+  <defs>
+    <linearGradient id="g1"><stop offset="0" stop-color="red"/><stop offset="1" stop-color="blue"/></linearGradient>
+    <marker id="m1" markerWidth="4" markerHeight="4"><path d="M0,0 L4,2 L0,4 z" fill="black"/></marker>
+    <clipPath id="c1"><rect x="0" y="0" width="50" height="40"/></clipPath>
+    <filter id="f1"><feGaussianBlur stdDeviation="2"/></filter>
+  </defs>
+  <rect x="5" y="50" width="30" height="20" fill="url(#g1)" stroke="black"/>
+  <path d="M60,50 L90,70" stroke="black" fill="none" marker-end="url(#m1)"/>
+  <g clip-path="url(#c1)"><circle cx="80" cy="20" r="10" fill="none" stroke="black"/></g>
+</svg>

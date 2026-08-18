@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="100mm" height="80mm" viewBox="0 0 100 80">
+  <foreignObject x="10" y="10" width="50" height="40">
+    <body xmlns="http://www.w3.org/1999/xhtml"><script>alert(1)</script></body>
+  </foreignObject>
+  <rect x="60" y="50" width="20" height="10" fill="none" stroke="black"/>
+</svg>

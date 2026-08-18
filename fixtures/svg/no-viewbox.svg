@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="120mm" height="90mm">
+  <!-- no viewBox: units are user units treated as px; geometry within 10..110 x 10..80 -->
+  <g stroke="#000000" fill="none">
+    <rect x="10" y="10" width="40" height="20"/>
+    <line x1="60" y1="10" x2="110" y2="80"/>
+  </g>
+</svg>

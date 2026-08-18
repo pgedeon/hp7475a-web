@@ -99,6 +99,7 @@ def split_chunks(data: bytes, max_len: int) -> list[bytes]:
 
 def _next_chunk(data: bytes, start: int, room: int) -> tuple[bytes, int]:
     """Return the next boundary-safe chunk from *start* within *room* bytes."""
+    room = max(room, 0)
     end = min(start + room, len(data))
     if end == len(data):
         return data[start:end], len(data)
@@ -225,16 +226,19 @@ class SerialTransport:
             try:
                 self.write(data)
                 line = self._responder.read_line(timeout=eff_timeout)
-                if parse is not None:
-                    try:
-                        return parse(line)
-                    except ResponderError as exc:
-                        last_error, last_was_malformed = exc, True
-                        logger.warning("malformed reply %r to %r: %s", line, data, exc)
-                else:
-                    return line
             except serial.SerialException as exc:
                 raise DeviceDisconnected(f"read failed: {exc}") from exc
+            except ResponderError as exc:
+                last_error, last_was_malformed = exc, False
+                logger.debug("no reply to %r: %s", data, exc)
+            else:
+                if parse is None:
+                    return line
+                try:
+                    return parse(line)
+                except ResponderError as exc:
+                    last_error, last_was_malformed = exc, True
+                    logger.warning("malformed reply %r to %r: %s", line, data, exc)
             self.drain()  # drop partial/stale bytes before retrying
         if last_was_malformed:
             raise TransportMalformed(f"unparseable reply after {attempts} attempts: {last_error}")
