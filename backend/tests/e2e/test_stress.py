@@ -113,3 +113,30 @@ def test_three_jobs_run_serially(stack, fake):
         worker.submit("start", jid)
         done = _wait(jobs, jid, {JobState.COMPLETED, JobState.FAILED, JobState.DISCONNECTED}, timeout=120)
         assert done.status == JobState.COMPLETED, done.error
+
+
+def test_giant_single_instruction_plots(stack, fake):
+    """Regression (live 2026-08-18): vpype-optimized output contains single
+    PD polylines > the 1024B plotter buffer. The 7475A parses HP-GL
+    incrementally — such instructions MUST plot (mid-instruction chunking),
+    not abort. Mirrors the failed a4_impossible_geometry job: a 1542B PD
+    at offset 32617 previously raised StreamerFatal."""
+    settings, jobs, worker = stack
+    # one ~5.6KB PD instruction (vpype linemerge-style giant polyline)
+    giant = "PD" + ",".join(
+        f"{100 + (i % 9000)},{100 + ((i * 7) % 7000)}" for i in range(400)
+    ) + ";"
+    assert len(giant) > 1024
+    payload = "IN;SP1;PU100,100;" + giant + "PU0,0;SP0;"
+    job = jobs.create(name="giant-polyline", hpgl=payload, paper="a4")
+    worker.submit("prepare", job.id)
+    _wait(jobs, job.id, {JobState.READY, JobState.FAILED})
+    worker.submit("start", job.id)
+    done = _wait(jobs, job.id, {JobState.COMPLETED, JobState.FAILED,
+                                JobState.DISCONNECTED}, timeout=120)
+    assert done.status == JobState.COMPLETED, done.error
+    assert done.bytes_sent == len(payload.encode())
+    assert fake.rs232_error == 0
+    # the plotter executed the full polyline: one PD token in its log
+    pds = [c for c in fake.commands if c.startswith("PD")]
+    assert len(pds) == 1 and len(pds[0]) == len(giant)

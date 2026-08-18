@@ -19,6 +19,7 @@ application relies on:
 from __future__ import annotations
 
 import logging
+import re
 import os
 import select
 import threading
@@ -32,6 +33,11 @@ _MOVERS = {"PA", "PR", "PU", "PD", "SP"}  # instructions that take real time
 
 _ESC_BYTE = 0x1B
 _TERM_BYTES = (0x3B, 0x3A)  # ';' ':'
+
+# one complete coordinate pair + its separator (",": more pairs follow,
+# ";": instruction terminator) — for incremental mover execution
+_PAIR_RE = re.compile(r"^(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)([,;])")
+_INCREMENTAL_MOVERS = ("PU", "PD", "PA", "PR")
 
 
 def _split_control_channel(stream: bytes) -> tuple[list[str], bytes, bytes]:
@@ -84,6 +90,12 @@ class FakeHP7475A:
         self._slave = -1
         self._reply_mode = "normal"  # normal | timeout | malformed
         self._pending_ctl = bytearray()  # incomplete escape bytes (control ch.)
+        # Incremental mover state: real hardware starts executing
+        # PU/PD/PA/PR coordinate pairs as they arrive — it does NOT wait
+        # for ';' (which may be many KB away). Without this, a single
+        # polyline longer than the 1024B buffer deadlocks it.
+        self._pending_mover: str | None = None
+        self._pending_token = ""
 
         # -- emulated device state (guarded by _lock) --
         self.x = 0
@@ -324,10 +336,47 @@ class FakeHP7475A:
                 time.sleep(self._exec_delay)
 
     def _pop_token(self) -> str | None:
-        """Pop one ';'-terminated instruction (escapes included) from the
-        buffer, freeing its bytes. Caller holds the lock."""
+        """Pop the next executable unit from the buffer, freeing its bytes.
+
+        Complete ';'-terminated instructions pop whole. A PARTIAL mover
+        instruction (PU/PD/PA/PR whose ';' has not arrived — legal, and
+        common when one polyline exceeds the 1024B buffer) pops its
+        complete coordinate pairs incrementally: real hardware moves the
+        pen as pairs arrive. Partial pops return the instruction-so-far;
+        _execute applies its last pair (idempotent) and skips the command
+        log until the terminator completes it. Caller holds the lock."""
+        if self._pending_mover:
+            head = self._inbuf[:64]
+            if head[:1] == b";":  # bare terminator: empty tail, done
+                self._pending_token += ";"
+                del self._inbuf[:1]
+                token = self._pending_token
+                self._pending_mover, self._pending_token = None, ""
+                return token
+            m = _PAIR_RE.match(head.decode("ascii", errors="replace"))
+            if m:
+                frag = m.group(0)
+                self._pending_token += frag
+                del self._inbuf[: len(frag)]
+                if m.group(3) == ";":
+                    token = self._pending_token
+                    self._pending_mover, self._pending_token = None, ""
+                    return token
+                return self._pending_token  # partial: pen already moves
+            if head[:1].isalpha():  # garbage mid-mover: resync (defensive)
+                self.hpgl_error = 1
+                self._pending_mover, self._pending_token = None, ""
+            return None
         idx = self._inbuf.find(b";")
         if idx < 0:
+            # No terminator anywhere: if the head starts an incremental
+            # mover, switch to pair-wise execution instead of deadlocking.
+            head = self._inbuf[:2].decode("ascii", errors="replace").upper()
+            if head in _INCREMENTAL_MOVERS and len(self._inbuf) > 2:
+                self._pending_mover = head
+                self._pending_token = head
+                del self._inbuf[:2]
+                return self._pop_token()
             return None
         token = bytes(self._inbuf[: idx + 1]).decode("ascii", errors="replace")
         del self._inbuf[: idx + 1]
@@ -344,7 +393,8 @@ class FakeHP7475A:
     def _execute(self, token: str) -> tuple[bool, str | None]:
         """Execute one instruction token. Returns (is_motion, reply)."""
         with self._lock:
-            self.commands.append(token)
+            if token.endswith(";"):  # partial pops re-log nothing new
+                self.commands.append(token)
             mnem = token[:2].upper()
             params = token[2:].rstrip(";").strip()
             reply: str | None = None
