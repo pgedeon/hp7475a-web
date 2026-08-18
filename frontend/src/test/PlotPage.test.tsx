@@ -130,7 +130,7 @@ describe("PlotPage", () => {
 
     // Open confirmation modal — Start Plot must be gated behind the checkbox
     fireEvent.click(screen.getByTestId("plot-btn"));
-    expect(screen.getByText(/the plotter WILL move/i)).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /the plotter WILL move/i })).toBeInTheDocument();
     expect(screen.getByTestId("confirm-start")).toBeDisabled();
     fireEvent.click(screen.getByTestId("confirm-check"));
     expect(screen.getByTestId("confirm-start")).toBeEnabled();

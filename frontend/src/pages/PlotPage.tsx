@@ -139,12 +139,20 @@ export default function PlotPage() {
   useEffect(() => {
     const m = ws.last;
     if (!m || !isJobEvent(m) || !job || m.job_id !== job.id) return;
-    setJob((prev) => prev && {
-      ...prev,
-      status: m.status,
-      bytes_sent: m.bytes_sent ?? prev.bytes_sent,
-      bytes_total: m.bytes_total ?? prev.bytes_total,
-      error: m.error ?? prev.error,
+    // Return the SAME ref when nothing changed — otherwise this effect
+    // re-fires on its own setJob and loops forever.
+    setJob((prev) => {
+      if (!prev || prev.id !== m.job_id) return prev;
+      const next = {
+        ...prev,
+        status: m.status,
+        bytes_sent: m.bytes_sent ?? prev.bytes_sent,
+        bytes_total: m.bytes_total ?? prev.bytes_total,
+        error: m.error ?? prev.error,
+      };
+      return next.status === prev.status && next.bytes_sent === prev.bytes_sent
+        && next.bytes_total === prev.bytes_total && next.error === prev.error
+        ? prev : next;
     });
   }, [ws.last, job]);
 

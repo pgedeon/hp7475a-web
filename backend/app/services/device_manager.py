@@ -102,7 +102,8 @@ class DeviceManager:
         return self._require_driver().status()
 
     def error(self) -> dict:
-        return self._require_driver().errors()
+        code, meaning = self._require_driver().errors()
+        return {"hpgl": {"code": code, "meaning": meaning}}
 
     def position(self) -> dict:
         return self._require_driver().position()
