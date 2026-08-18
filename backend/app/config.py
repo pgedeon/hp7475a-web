@@ -28,8 +28,8 @@ class Settings(BaseSettings):
     write_timeout_s: float = 5.0
 
     # Buffer-safe streaming (docs/hardware-notes.md §6)
-    stream_safety_margin: int = 32
-    stream_default_chunk: int = 512
+    stream_safety_margin: int = 64
+    stream_default_chunk: int = 256
     stream_query_timeout_s: float = 2.0
     stream_max_retries: int = 3
     completion_timeout_s: float = 600.0

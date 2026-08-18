@@ -139,12 +139,12 @@ class HardwareWorker:
         job = self._store.get(job_id)
         if job.status == JobState.PAUSED:
             # resume path
-            self._store.set_state(job_id, JobState.SENDING)
+            self._safe_set_state(job_id, JobState.SENDING)
         elif job.status == JobState.READY:
-            self._store.set_state(job_id, JobState.SENDING)
+            self._safe_set_state(job_id, JobState.SENDING)
         driver = self._devices.driver()
         if driver is None:
-            self._store.set_state(job_id, JobState.FAILED, error="device not connected")
+            self._safe_set_state(job_id, JobState.FAILED, error="device not connected")
             return
         payload = job.hpgl
         transport = driver.transport
@@ -161,30 +161,42 @@ class HardwareWorker:
         )
         self._pause.clear()
         self._cancel.clear()
+        self._devices.set_streaming(True)  # serial lane owned by the stream
         try:
             self._stream_with_pause_support(streamer, payload, job_id)
-            self._store.set_state(job_id, JobState.PLOTTING)  # all bytes buffered/accepted
-            self._store.set_state(job_id, JobState.COMPLETING)
+            self._safe_set_state(job_id, JobState.PLOTTING)  # all bytes buffered/accepted
+            self._safe_set_state(job_id, JobState.COMPLETING)
             driver.complete_plot(timeout=self._settings.completion_timeout_s)
-            self._store.set_state(job_id, JobState.COMPLETED)
+            self._safe_set_state(job_id, JobState.COMPLETED)
             self._store.prune_history()
         except StreamInterrupted as exc:
             reason = str(exc)
             if "paused" in reason:
-                self._store.set_state(job_id, JobState.PAUSED)
+                self._safe_set_state(job_id, JobState.PAUSED)
                 self._wait_while_paused(job_id)
                 # resume: re-stream from current offset
                 self._resume_stream(job_id)
             elif "cancelled" in reason:
-                self._store.set_state(job_id, JobState.CANCELLED)
+                self._safe_set_state(job_id, JobState.CANCELLED)
             else:
-                self._store.set_state(job_id, JobState.FAILED, error=reason)
+                self._safe_set_state(job_id, JobState.FAILED, error=reason)
         except StreamerFatal as exc:
-            self._store.set_state(job_id, JobState.FAILED, error=str(exc))
+            self._safe_set_state(job_id, JobState.FAILED, error=str(exc))
         except DeviceDisconnected:
-            self._store.set_state(job_id, JobState.DISCONNECTED, error="device disconnected")
+            self._safe_set_state(job_id, JobState.DISCONNECTED, error="device disconnected")
         except Exception as exc:
-            self._store.set_state(job_id, JobState.FAILED, error=f"{type(exc).__name__}: {exc}")
+            self._safe_set_state(job_id, JobState.FAILED, error=f"{type(exc).__name__}: {exc}")
+        finally:
+            self._devices.set_streaming(False)
+
+    def _safe_set_state(self, job_id: str, state, error: str | None = None) -> None:
+        """set_state that tolerates the job being deleted mid-run (a DELETE
+        during an active stream is a legal race; the worker must not spew
+        tracebacks when its final transition finds the job gone)."""
+        try:
+            self._store.set_state(job_id, state, error=error)
+        except Exception:
+            logger.debug("job %s vanished before %s transition", job_id, getattr(state, "value", state))
 
     def _stream_with_pause_support(self, streamer, payload, job_id) -> None:
         """Run stream() in a helper thread so pause/cancel events can break

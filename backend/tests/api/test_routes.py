@@ -278,7 +278,11 @@ def test_delete_active_job_conflict(client):
     client.post(f"/api/jobs/{job_id}/start")
     r = client.delete(f"/api/jobs/{job_id}")
     assert r.status_code in (409, 200)  # depends on timing; both legal per spec
-    # ensure terminal
+    if r.status_code == 200:
+        # job already terminal and deleted — re-delete must 404, nothing more
+        assert client.delete(f"/api/jobs/{job_id}").status_code == 404
+        return
+    # still active (409): cancel, wait terminal, then delete must succeed
     client.post(f"/api/jobs/{job_id}/cancel")
     for _ in range(50):
         job = client.get(f"/api/jobs/{job_id}").json()

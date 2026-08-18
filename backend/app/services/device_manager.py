@@ -22,6 +22,13 @@ class DeviceManager:
         self._driver: Any = None  # serial.driver.HP7475ADevice when connected
         self._port: str | None = None
         self._settings_snapshot: dict | None = None
+        # Streaming guard: while a job is streaming HP-GL, NO other code may
+        # touch the port — concurrent queries (OS;/OA;/ESC.B) interleave bytes
+        # and cross replies with the streamer's flow-control handshake, which
+        # aborts plots mid-burst (observed live 2026-08-18). Query methods
+        # serve cached data; manual pen/move commands fail closed.
+        self._streaming = False
+        self._cached_status: dict | None = None
 
     # -- connection state -----------------------------------------------------
 
@@ -108,39 +115,79 @@ class DeviceManager:
             return obj
         raise TypeError(f"unshapable driver result: {obj!r}")
 
+    # -- streaming guard -------------------------------------------------------
+
+    def set_streaming(self, active: bool) -> None:
+        """Mark the serial lane as owned by an active plot stream.
+        The job worker toggles this around streamer.send; everything else
+        must then avoid the port (cached status / DeviceBusy errors)."""
+        with self._lock:
+            self._streaming = active
+
+    @property
+    def streaming(self) -> bool:
+        with self._lock:
+            return self._streaming
+
+    def _check_hardware_free(self, action: str) -> None:
+        """Raise when a plot stream owns the port (fail-closed for manual
+        commands; query methods use cached paths instead)."""
+        if self.streaming:
+            raise RuntimeError(
+                f"device busy: plot in progress ({action} blocked until it "
+                f"finishes, pauses, or is cancelled)"
+            )
+
+    # -- passthrough helpers (guard + delegate) ---------------------------------
+
     def identify(self) -> dict:
+        self._check_hardware_free("identify")
         result = self._require_driver().identify()
         return {"identity": result} if isinstance(result, str) else self._dc(result)
 
     def status(self) -> dict:
-        return self._dc(self._require_driver().status())
+        """OS; status report. During streaming: last cached report (never
+        touches the port — a concurrent OS; would corrupt the handshake)."""
+        if self.streaming:
+            cached = self._cached_status or {}
+            return {"streaming": True, "stale": True, **cached}
+        result = self._dc(self._require_driver().status())
+        self._cached_status = result
+        return result
 
     def error(self) -> dict:
+        self._check_hardware_free("error query")
         code, meaning = self._require_driver().errors()
         return {"hpgl": {"code": code, "meaning": meaning}}
 
     def position(self) -> dict:
+        self._check_hardware_free("position query")
         result = self._require_driver().position()
         if isinstance(result, tuple):
             return {"x": result[0], "y": result[1], "pen_down": result[2]}
         return self._dc(result)
 
     def select_pen(self, pen: int) -> dict:
+        self._check_hardware_free("select pen")
         self._require_driver().select_pen(pen)
         return {"pen": pen}
 
     def pen_up(self) -> dict:
+        self._check_hardware_free("pen up")
         self._require_driver().pen_up()
         return {"pen_down": False}
 
     def pen_down(self) -> dict:
+        self._check_hardware_free("pen down")
         self._require_driver().pen_down()
         return {"pen_down": True}
 
     def move(self, x: float, y: float) -> dict:
+        self._check_hardware_free("move")
         return self._dc(self._require_driver().move_abs(x, y))
 
     def park(self) -> dict:
+        self._check_hardware_free("park")
         self._require_driver().park()
         return {"parked": True}
 
@@ -156,4 +203,5 @@ class DeviceManager:
         return {"limits": [xmin, ymin, xmax, ymax], "paper": match}
 
     def buffer_space(self) -> int:
+        self._check_hardware_free("buffer query")
         return self._require_driver().buffer_space()

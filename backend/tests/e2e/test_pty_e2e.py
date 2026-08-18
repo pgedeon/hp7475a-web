@@ -154,3 +154,54 @@ def test_e2e_timeout_fault_fails_job(stack, fake):
     )
     assert done.status == JobState.FAILED
     assert done.error
+
+
+def test_e2e_status_polls_during_stream_do_not_touch_port(stack, fake):
+    """Live regression (2026-08-18): browser status polls mid-plot injected
+    OS;/buffer queries into the stream, crossing replies and aborting the
+    job after ~900 bytes. With the streaming guard, polls during SENDING
+    return cached data and the plot must still complete with zero
+    rs232-error conditions on the device."""
+    settings, db, jobs, devices, worker = stack
+    def _wait(job_id, want, timeout=120.0):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            j = jobs.get(job_id)
+            if j.status in want:
+                return j
+            time.sleep(0.05)
+        raise AssertionError(f"stuck in {jobs.get(job_id).status}, wanted {want}")
+
+    payload = "IN;SP1;PU100,100;" + "PD200,300;PD300,100;" * 400 + "PU0,0;SP0;"
+    job = jobs.create(name="poll-under-stream", hpgl=payload, paper="a4")
+    worker.submit("prepare", job.id)
+    _wait(job.id, {JobState.READY, JobState.FAILED})
+    worker.submit("start", job.id)
+
+    # hammer the status route's manager path while the stream runs
+    import threading
+    stop = threading.Event()
+    polled = {"n": 0, "touched_port": 0}
+
+    def poller():
+        while not stop.is_set():
+            try:
+                s = devices.status()
+                polled["n"] += 1
+                if not s.get("stale"):
+                    polled["touched_port"] += 1
+            except Exception:
+                pass
+            time.sleep(0.01)
+
+    t = threading.Thread(target=poller, daemon=True)
+    t.start()
+    done = _wait(job.id, {JobState.COMPLETED, JobState.FAILED,
+                          JobState.DISCONNECTED})
+    stop.set()
+    t.join(timeout=2)
+
+    assert done.status == JobState.COMPLETED, done.error
+    assert done.bytes_sent == len(payload.encode())
+    assert fake.rs232_error == 0
+    assert polled["n"] > 0  # polls actually ran during the stream
