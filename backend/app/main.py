@@ -67,7 +67,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.include_router(router)
 
-    dist = Path(__file__).resolve().parent.parent / "frontend_dist"
+    dist = Path(__file__).resolve().parent / "frontend_dist"
     if dist.is_dir():
         app.mount("/", StaticFiles(directory=dist, html=True), name="frontend")
         logger.info("serving frontend from %s", dist)

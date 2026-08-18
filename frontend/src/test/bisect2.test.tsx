@@ -44,48 +44,13 @@ beforeEach(() => {
 });
 
 describe("bisect", () => {
-  it("A: upload only", async () => {
-    mockApi.uploadSvg.mockResolvedValue({ id: "f1", name: "drawing.svg", size: 100, sanitize: {} });
-    mockApi.analysis.mockResolvedValue({ layers: ["cut"], stroke_colors: ["#f00"], unsupported: [] });
-    render(<AppProvider><PlotPage /></AppProvider>);
-    const input = await screen.findByLabelText("SVG file");
-    await act(async () => {
-      fireEvent.change(input, { target: { files: [new File(["<svg/>"], "drawing.svg")] } });
-    });
-    expect(await screen.findByTestId("analysis")).toBeInTheDocument();
-  });
-
-  it("B: upload + prepare click", async () => {
-    console.log("B start");
-    mockApi.uploadSvg.mockResolvedValue({ id: "f1", name: "drawing.svg", size: 100, sanitize: {} });
-    mockApi.analysis.mockResolvedValue({ layers: ["cut"], stroke_colors: ["#f00"], unsupported: [] });
-    mockApi.createJob.mockResolvedValue({ ...JOB });
-    mockApi.prepareJob.mockResolvedValue({ accepted: true });
-    render(<AppProvider><PlotPage /></AppProvider>);
-    const input = await screen.findByLabelText("SVG file");
-    console.log("B upload");
-    await act(async () => {
-      fireEvent.change(input, { target: { files: [new File(["<svg/>"], "drawing.svg")] } });
-    });
-    try {
-      await screen.findByTestId("analysis", {}, { timeout: 2000 });
-    } catch (e) {
-      console.log("C analysis FAIL", e instanceof Error ? e.message : e);
-      throw e;
-    }
-    console.log("B click prepare");
-    await act(async () => {
-      fireEvent.click(screen.getByTestId("prepare-btn"));
-    });
-    console.log("B prepare done");
-    expect(mockApi.prepareJob).toHaveBeenCalledWith("job-1");
-  });
-
   it("C: B + WS emit", async () => {
     console.log("C start");
     mockApi.uploadSvg.mockResolvedValue({ id: "f1", name: "drawing.svg", size: 100, sanitize: {} });
     mockApi.analysis.mockResolvedValue({ layers: ["cut"], stroke_colors: ["#f00"], unsupported: [] });
     mockApi.createJob.mockResolvedValue({ ...JOB });
+    mockApi.getJob.mockResolvedValue({ ...JOB, status: "READY", bytes_total: 2048 });
+    mockApi.jobPreview.mockResolvedValue(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 297 210"><path d="M0 0L1 1"/></svg>`);
     mockApi.prepareJob.mockResolvedValue({ accepted: true });
     render(<AppProvider><PlotPage /></AppProvider>);
     console.log("C rendered");
@@ -95,17 +60,21 @@ describe("bisect", () => {
       fireEvent.change(input, { target: { files: [new File(["<svg/>"], "drawing.svg")] } });
     });
     console.log("C uploaded");
-    for (let i = 0; i < 15; i++) {
-      const el = document.querySelector('[data-testid="analysis"]');
-      console.log("poll", i, "found:", !!el, "bodyLen:", document.body.innerHTML.length);
-      if (el) break;
-      await new Promise((r) => setTimeout(r, 100));
+    try {
+      await screen.findByTestId("analysis", {}, { timeout: 2000 });
+    } catch (e) {
+      console.log("analysis FAIL");
+      throw e;
     }
-    expect(screen.getByTestId("analysis")).toBeInTheDocument();
     console.log("C analysis");
-    await act(async () => {
-      fireEvent.click(screen.getByTestId("prepare-btn"));
-    });
+    fireEvent.click(screen.getByTestId("prepare-btn"));
+    console.log("C clicked");
+    await Promise.resolve();
+    console.log("C microtask1");
+    await new Promise((r) => setTimeout(r, 0));
+    console.log("C macrotask0");
+    await new Promise((r) => setTimeout(r, 10));
+    console.log("C macrotask10");
     console.log("C prepare-act resolved");
     console.log("C emit");
     act(() => {
