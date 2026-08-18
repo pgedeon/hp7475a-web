@@ -13,40 +13,40 @@ Legend: `TODO` → `IN PROGRESS` → `DONE` (tested) · `READY FOR USER HARDWARE
 
 ## Phase 2 — Serial transport  *(delegated: serial-core)*
 
-- [ ] IN PROGRESS — Port discovery (`serial.tools.list_ports`, by-id preference, FTDI flag, permission check)
-- [ ] TODO — Connection lifecycle + settings validation (9600 8N1 default, editable)
-- [ ] TODO — Response parser (OI/OA/OC/OE/OS/ESC.B/ESC.E; CR-terminated)
-- [ ] TODO — Flow-control strategies: software-checking (ESC .B polling) preferred; XON/XOFF; hardwire DTR; diagnostic chunk/delay
-- [ ] TODO — PTY fake plotter emulator (identify, buffer query, position, errors, finite buffer, delayed exec, timeout/disconnect/malformed modes)
-- [ ] TODO — Unit tests: discovery, parsing, chunk sizing, partial writes, timeouts, retries, disconnect
+- [x] DONE — Port discovery (`serial.tools.list_ports`, by-id preference, FTDI flag, permission check)
+- [x] DONE — Connection lifecycle + settings validation (9600 8N1 default, editable)
+- [x] DONE — Response parser (OI/OA/OC/OE/OS/ESC.B/ESC.E; CR-terminated)
+- [x] DONE — Flow-control strategies: software-checking (ESC .B polling) preferred; XON/XOFF; hardwire DTR; diagnostic chunk/delay
+- [x] DONE — PTY fake plotter emulator (identify, buffer query, position, errors, finite buffer, delayed exec, timeout/disconnect/malformed modes)
+- [x] DONE — Unit tests: discovery, parsing, chunk sizing, partial writes, timeouts, retries, disconnect
 
 ## Phase 3 — HP 7475A driver
 
-- [ ] TODO — HP7475ADevice: init, identify, error/position queries, pen select/up/down, absolute moves, velocity, park
-- [ ] TODO — Jog safeguards (hard-clip clamping)
-- [ ] TODO — Completion detection (queued OA + OS polling)
-- [ ] TODO — Cancel semantics: stop-sending vs device reset (documented only)
-- [ ] TODO — Tests with fake plotter
+- [x] DONE — HP7475ADevice: init, identify, error/position queries, pen select/up/down, absolute moves, velocity, park
+- [x] DONE — Jog safeguards (hard-clip clamping)
+- [x] DONE — Completion detection (queued OA + OS polling)
+- [x] DONE — Cancel semantics: stop-sending vs device reset (documented only)
+- [x] DONE — Tests with fake plotter (81 tests)
 
 ## Phase 4 — SVG pipeline  *(delegated: svg-pipeline)*
 
-- [ ] TODO — Secure upload (size cap, sanitize: scripts/events/XXE/foreignObject/external refs)
-- [ ] TODO — Analyzer: layers (Inkscape), groups, stroke colors, unsupported-content report (text, raster, filters…)
-- [ ] TODO — vpype integration: read → optimize (simplify/merge/sort/reloop options) → layout → pens → HP-GL (hp7475a profile)
-- [ ] TODO — Fill modes: ignore / outline-only (hatch = Phase 2+)
-- [ ] TODO — HP-GL writer + safety validator (allowlist, extents, pen range, size cap, safe suffix)
-- [ ] TODO — Preview payload = post-processing geometry (optimized SVG path data)
-- [ ] TODO — Fixtures (simple shapes → malicious → all paper sizes) + golden tests
+- [x] DONE — Secure upload (size cap, sanitize: scripts/events/XXE/foreignObject/external refs)
+- [x] DONE — Analyzer: layers (Inkscape), groups, stroke colors, unsupported-content report (text, raster, filters…)
+- [x] DONE — vpype integration: read → optimize (simplify/merge/sort/reloop options) → layout → pens → HP-GL (hp7475a profile)
+- [x] DONE — Fill modes: ignore / outline-only (hatch = Phase 2+)
+- [x] DONE — HP-GL writer + safety validator (allowlist, extents, pen range, size cap, safe suffix)
+- [x] DONE — Preview payload = post-processing geometry (optimized SVG path data)
+- [x] DONE — Fixtures (simple shapes → malicious → all paper sizes) + golden tests
 
 ## Phase 5 — Job runner & API
 
 - [ ] TODO — SQLite models (jobs, settings, pens) + migrations
-- [ ] TODO — Single hardware worker queue (serialized serial access)
-- [ ] TODO — Buffer-safe streamer job state machine (QUEUED…DISCONNECTED)
-- [ ] TODO — Pause/resume/cancel/replot/duplicate; history + retention
-- [ ] TODO — REST API per spec §33 + WebSocket /api/ws/status
-- [ ] TODO — Bind 127.0.0.1 default; LAN mode + auth off by default
-- [ ] TODO — Tests: state transitions, concurrency (one writer), timeout→FAILED, disconnect→DISCONNECTED
+- [x] DONE — Single hardware worker queue (serialized serial access)
+- [x] DONE — Buffer-safe streamer job state machine (QUEUED…DISCONNECTED)
+- [x] DONE — Pause/resume/cancel/replot/duplicate; history + retention
+- [x] DONE — REST API per spec §33 + WebSocket /api/ws/status
+- [x] DONE — Bind 127.0.0.1 default; LAN mode + auth off by default
+- [x] DONE — Tests: state transitions, concurrency (one writer), timeout→FAILED, disconnect→DISCONNECTED
 
 ## Phase 6 — Frontend
 
