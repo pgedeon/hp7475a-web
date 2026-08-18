@@ -57,6 +57,7 @@ class DeviceManager:
         real HP7475ADevice from the serial lane (lazy import keeps tests
         independent of pyserial hardware presence)."""
         from app.services.serial.driver import HP7475ADevice  # lazy: serial lane
+        from app.services.serial.transport import TransportSettings
 
         factory = driver_factory or HP7475ADevice
         with self._lock:
@@ -64,11 +65,15 @@ class DeviceManager:
                 raise RuntimeError(
                     f"already connected to {self._port}; disconnect first"
                 )
-            driver = factory(port, settings or {})
+            raw = settings or {}
+            valid = {f for f in TransportSettings.__dataclass_fields__}
+            coerced = {k: v for k, v in raw.items() if k in valid}
+            ts = TransportSettings(**coerced) if coerced else None
+            driver = factory(port, ts)
             info = driver.connect()  # drains + identifies; NO pen motion
             self._driver = driver
             self._port = port
-            self._settings_snapshot = settings or {}
+            self._settings_snapshot = raw
             return info
 
     def disconnect(self) -> None:
