@@ -67,7 +67,12 @@ describe("bisect", () => {
     await act(async () => {
       fireEvent.change(input, { target: { files: [new File(["<svg/>"], "drawing.svg")] } });
     });
-    await screen.findByTestId("analysis");
+    try {
+      await screen.findByTestId("analysis", {}, { timeout: 2000 });
+    } catch (e) {
+      console.log("C analysis FAIL", e instanceof Error ? e.message : e);
+      throw e;
+    }
     console.log("B click prepare");
     await act(async () => {
       fireEvent.click(screen.getByTestId("prepare-btn"));
@@ -82,13 +87,16 @@ describe("bisect", () => {
     mockApi.analysis.mockResolvedValue({ layers: ["cut"], stroke_colors: ["#f00"], unsupported: [] });
     mockApi.createJob.mockResolvedValue({ ...JOB });
     mockApi.prepareJob.mockResolvedValue({ accepted: true });
-    mockApi.jobPreview.mockResolvedValue(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 297 210"><path d="M0 0L1 1"/></svg>`);
     render(<AppProvider><PlotPage /></AppProvider>);
+    console.log("C rendered");
     const input = await screen.findByLabelText("SVG file");
+    console.log("C input found");
     await act(async () => {
       fireEvent.change(input, { target: { files: [new File(["<svg/>"], "drawing.svg")] } });
     });
+    console.log("C uploaded");
     await screen.findByTestId("analysis");
+    console.log("C analysis");
     await act(async () => {
       fireEvent.click(screen.getByTestId("prepare-btn"));
     });
