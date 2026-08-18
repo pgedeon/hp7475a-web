@@ -46,6 +46,14 @@ pool deadlocks on some WSL2 hosts.
   `Jobs` (history + HP-GL drawer + replot/delete), `Device` (5-step connect
   wizard, FTDI/dialout hints, status bits), `Diagnostics` (buffer/error poll,
   raw WS log), `Settings` (stream view + custom JSON editor).
+- **Paper & scale (Plot page):** paper size is explicit — when the plotter is
+  connected, `GET /api/device/hard-clip` is queried on mount and on connect
+  state changes, and the DIP-switched paper (e.g. A4) becomes the default
+  selection with a "Plotter: A4" hint. Picking a sheet larger than the
+  plotter's shows a non-blocking warning (the backend rejects/clamps it).
+  The scale slider (25–100% of best-fit, default 100%) sends `scale` in the
+  create-job payload; changing paper or scale re-prepares the job (debounced
+  400 ms) so the preview stays live. Pen map and options survive re-prepare.
 - `src/components/` — `StatusBadge`, `PenMap`, `Modal`, `Progress`, `Toast`,
   `PagePreview` (client-side SVG re-sanitize before inline render).
 - Pen mapping modes: **By Layer** (Inkscape layer names) or **By Color**

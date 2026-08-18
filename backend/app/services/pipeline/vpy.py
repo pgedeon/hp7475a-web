@@ -85,6 +85,10 @@ class PipelineOptions:
     linesort: bool = False
     reloop: bool = False
     margin_mm: float = 10.0
+    #: user resize control: final geometry = fit-to-paper × scale
+    #: (1.0 = largest safe fit inside margin; 0.5 = half that). Bounds-
+    #: checked 0.25–1.0 at from_dict.
+    scale: float = 1.0
     quantization_mm: float = 0.1
     velocity_cm_s: float | None = None
     landscape: bool = True
@@ -105,6 +109,11 @@ class PipelineOptions:
                 continue
             if k in ("margin_mm", "quantization_mm"):
                 clean[k] = float(v)
+            elif k == "scale":
+                s = float(v)
+                if not 0.25 <= s <= 1.0:
+                    raise ValueError("scale must be between 0.25 and 1.0")
+                clean[k] = s
             elif k == "velocity_cm_s":
                 clean[k] = float(v) if v is not None else None
             else:
@@ -171,8 +180,12 @@ def _plottable_rect_mm(pc) -> tuple[float, float, float, float]:
     )
 
 
-def _place_on_paper(doc: vp.Document, paper: Paper, options: PipelineOptions) -> None:
-    """Scale-to-fit + center geometry inside the plottable rect (in-place)."""
+def _place_on_paper(doc: vp.Document, paper: Paper, options: PipelineOptions) -> float:
+    """Scale-to-fit + center geometry inside the plottable rect (in-place).
+
+    Returns the applied absolute fit scale (mm/mm, before the user
+    ``options.scale`` multiplier is included in the returned value as-is
+    — see callers: stats report both)."""
     pc = _paper_config(paper)
     clip = _plottable_rect_mm(pc)
     cx0, cy0, cx1, cy1 = clip
@@ -187,7 +200,8 @@ def _place_on_paper(doc: vp.Document, paper: Paper, options: PipelineOptions) ->
     if bw <= 0 or bh <= 0:
         raise ValueError("degenerate geometry bounds")
 
-    scale = min(avail_w / bw, avail_h / bh)
+    fit = min(avail_w / bw, avail_h / bh)
+    scale = fit * options.scale
     scale_px = scale  # mm/mm is dimensionless; apply directly to px coords
     doc.scale(scale_px)
 
@@ -202,6 +216,7 @@ def _place_on_paper(doc: vp.Document, paper: Paper, options: PipelineOptions) ->
         paper.size_mm[1], paper.size_mm[0]
     )
     doc.page_size = (page_mm[0] * _PX_PER_MM, page_mm[1] * _PX_PER_MM)
+    return scale
 
 
 # ---------------------------------------------------------------------------
@@ -286,7 +301,7 @@ def run_pipeline(
     if doc.is_empty():
         raise ValueError("SVG contains no plottable geometry")
 
-    _place_on_paper(doc, p, options)
+    _place_scale = _place_on_paper(doc, p, options)
 
     # ---- per-layer HP-GL via vpype hp7475a writer ----
     chunks: list[tuple[int, int, str]] = []  # (layer_id, pen, geometry-only HP-GL)
@@ -368,6 +383,8 @@ def run_pipeline(
     }
     stats = {
         "paper": p.name,
+        "fit_scale": round(_place_scale, 4),
+        "user_scale": options.scale,
         "layers": layer_stats,
         "total_paths": sum(s["paths"] for s in layer_stats.values()),
         "pen_up_travel_mm": round(float(doc.pen_up_length()) / _PX_PER_MM, 2),

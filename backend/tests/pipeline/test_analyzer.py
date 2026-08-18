@@ -43,8 +43,11 @@ def test_a4_fit_fits_a4_not_ansi_a():
 
 
 def test_a3_only_fits_exactly_a3():
+    # Exact-fit semantics (2026-08-18): fit = "can go on the sheet at all";
+    # safety margins are the pipeline's concern (it scale-fits). The 380×272
+    # design fits A3 and also imperial B (431.8×279.4) — geometrically true.
     fit = _analyze("a3-only.svg").est_paper_fit
-    assert fit == {"a4": False, "a3": True, "a": False, "b": False}
+    assert fit == {"a4": False, "a3": True, "a": False, "b": True}
 
 
 def test_huge_coords_fit_nowhere():
@@ -81,3 +84,22 @@ def test_layers_fall_back_to_top_level_groups():
     )
     clean, _ = sanitize_svg(data)
     assert analyze_svg(clean).layers == ["alpha", "beta"]
+
+
+def test_exact_a4_design_fits_a4():
+    """Regression (2026-08-18 vertical-lines bug): a 210×297 design must
+    report a4 fit True — the old margin-deducted estimate said False, the
+    UI auto-picked A3, and an A4-DIP plotter clamped the coords into
+    garbage vertical lines."""
+    import io
+
+    from app.services.pipeline.analyzer import analyze_svg
+
+    svg = (
+        b'<svg xmlns="http://www.w3.org/2000/svg" width="210mm" height="297mm" '
+        b'viewBox="0 0 210 297"><g stroke="black" fill="none">'
+        b'<rect x="10" y="10" width="190" height="277"/></g></svg>'
+    )
+    fit = analyze_svg(svg).est_paper_fit
+    assert fit["a4"] is True
+    assert fit["a3"] is True

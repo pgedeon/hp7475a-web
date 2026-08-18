@@ -279,15 +279,20 @@ def _declared_bbox_px(root: ET.Element) -> tuple[float, float, float, float] | N
 # --------------------------------------------------------------------------
 
 def _paper_fit(bbox_mm: tuple[float, float, float, float] | None) -> dict[str, bool]:
-    """Fit estimate per PAPERS with FIT_MARGIN_MM (orientation-agnostic)."""
+    """Fit estimate per PAPERS, orientation-agnostic, EXACT fit allowed.
+
+    A design exactly the size of the paper fits (the pipeline scales to
+    fit inside its safety margin — est_paper_fit answers 'can this go on
+    that sheet at all', not 'with margin'). Regression (2026-08-18): a
+    210×297 design reported a4:false and the UI auto-picked A3 while the
+    plotter was DIP-switched to A4 → clamped coords → vertical lines."""
     if bbox_mm is None:
         return {name: False for name in PAPERS}
     x0, y0, x1, y1 = bbox_mm
     w, h = x1 - x0, y1 - y0
     result: dict[str, bool] = {}
     for name, paper in PAPERS.items():
-        pw = paper.size_mm[0] - 2 * FIT_MARGIN_MM
-        ph = paper.size_mm[1] - 2 * FIT_MARGIN_MM
+        pw, ph = paper.size_mm
         result[name] = (w <= pw and h <= ph) or (w <= ph and h <= pw)
     return result
 

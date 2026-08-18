@@ -132,3 +132,17 @@ def get_paper(name: str) -> Paper:
     raise KeyError(
         f"Unknown paper {name!r}. Valid: {sorted(PAPERS)} (aliases: {sorted(_ALIASES)})"
     )
+
+
+def clip_fits(paper: Paper, limits: tuple[int, int, int, int]) -> bool:
+    """True when *paper*'s hard-clip rect fits inside the device's actual
+    clip *limits* (xmin, ymin, xmax, ymax from OH;).
+
+    Guards against the clamp-artifact failure (2026-08-18): preparing a
+    job for A3 while the plotter's DIP switches select A4 silently clamps
+    every coordinate beyond the real clip — drawing vertical garbage lines
+    at the sheet edge. """
+    xmin, ymin, xmax, ymax = limits
+    px0, px1 = paper.x_range
+    py0, py1 = paper.y_range
+    return px0 >= xmin and py0 >= ymin and px1 <= xmax and py1 <= ymax

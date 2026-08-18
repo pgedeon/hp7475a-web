@@ -13,6 +13,14 @@ interface OptState { linemerge: boolean; linesimplify: boolean; sort: boolean; r
 const DEFAULT_OPTS: OptState = { linemerge: true, linesimplify: true, sort: true, reloop: true };
 
 const ACTIVE_STATES = new Set(["QUEUED", "PREPARING", "READY", "SENDING", "PLOTTING", "COMPLETING", "PAUSED"]);
+/** States in which the hardware is moving — never auto re-prepare then. */
+const PLOTTING_STATES = new Set(["SENDING", "PLOTTING", "PAUSED", "COMPLETING"]);
+
+/** Paper areas in mm² for "is the picked sheet larger than the plotter's?"
+ *  Fallback when the /api/papers table hasn't loaded yet. */
+const PAPER_AREA_MM2: Record<string, number> = {
+  a4: 297 * 210, a3: 420 * 297, a: 279.4 * 215.9, b: 431.8 * 279.4,
+};
 
 /** Per-file mapping selections: active mode + separate maps keyed for each
  *  mode (layer names vs color hexes) so toggling never loses selections. */
@@ -57,13 +65,15 @@ function SanitizeReportView({ report }: { report: Record<string, unknown> }) {
 }
 
 export default function PlotPage() {
-  const { papers, papersError, retryPapers, toast, ws } = useApp();
+  const { papers, papersError, retryPapers, toast, ws, device } = useApp();
 
   const [file, setFile] = useState<UploadSvgResult | null>(null);
   const [analysis, setAnalysis] = useState<Analysis | null>(null);
   const [analysisError, setAnalysisError] = useState<string | null>(null);
   const [mapState, setMapState] = useState<Record<string, FileMapState>>({});
   const [paper, setPaper] = useState<string>("a4");
+  const [scale, setScale] = useState(100);
+  const [plotterPaper, setPlotterPaper] = useState<string | null>(null);
   const [opts, setOpts] = useState<OptState>(DEFAULT_OPTS);
   const [velSelect, setVelSelect] = useState<string>("");
   const [customVel, setCustomVel] = useState(20);
@@ -77,6 +87,15 @@ export default function PlotPage() {
   const [dragOver, setDragOver] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
+  /** Latest job for the debounced re-prepare effect (kept out of deps so a
+   *  status change alone never re-triggers it). */
+  const jobRef = useRef<Job | null>(null);
+  jobRef.current = job;
+  /** Skip the very first run of the re-prepare effect (initial state, not a
+   *  user change). */
+  const reprepareStarted = useRef(false);
+  /** Once the user picks a paper, hard-clip detection stops overriding it. */
+  const paperTouched = useRef(false);
 
   const layers = useMemo(() => normalizeLayers(analysis?.layers), [analysis]);
   const strokeColors = useMemo(() => analysis?.stroke_colors ?? [], [analysis]);
@@ -150,6 +169,7 @@ export default function PlotPage() {
       if (vel != null) options.velocity = vel;
       const j = await api.createJob({
         file_id: file.id, name: file.name, paper,
+        scale: scale / 100,
         pen_map: penMap, pen_map_mode: mode, options,
       });
       setJob(j); setPreviewSvg(null); setPreviewError(null);
@@ -161,6 +181,35 @@ export default function PlotPage() {
       setPreparing(false);
     }
   };
+
+  // Detect the plotter's DIP-switched paper (hard-clip query) on mount and
+  // whenever connection state changes; adopt it as the default selection
+  // until the user picks one themselves.
+  const connected = device?.connected;
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const hc = await api.hardClip();
+        if (!alive) return;
+        setPlotterPaper(hc.paper);
+        if (hc.paper && !paperTouched.current) setPaper(hc.paper);
+      } catch {
+        if (alive) setPlotterPaper(null); // disconnected / backend offline
+      }
+    })();
+    return () => { alive = false; };
+  }, [connected]);
+
+  // Paper/scale changes re-prepare (debounced) so the preview reflects the
+  // new selection. Only after a first prepare exists, and never while the
+  // hardware is moving. Pen map + options state is untouched by prepare.
+  useEffect(() => {
+    if (!reprepareStarted.current) { reprepareStarted.current = true; return; }
+    if (!jobRef.current || PLOTTING_STATES.has(jobRef.current.status)) return;
+    const t = setTimeout(() => void prepare(), 400);
+    return () => clearTimeout(t);
+  }, [paper, scale]);
 
   // Poll job while active; fetch preview once not-QUEUED/PREPARING.
   useEffect(() => {
@@ -228,6 +277,11 @@ export default function PlotPage() {
   const canResume = job && job.status === "PAUSED";
   const canCancel = job && ACTIVE_STATES.has(job.status);
   const pensUsed = [...new Set(Object.values(penMap))].sort();
+  const paperArea = (name: string): number =>
+    papers[name] ? papers[name].size_mm[0] * papers[name].size_mm[1]
+      : (PAPER_AREA_MM2[name] ?? 0);
+  const paperMismatch = plotterPaper != null && connected === true
+    && paperArea(paper) > paperArea(plotterPaper) && paperArea(plotterPaper) > 0;
 
   return (
     <div className="page plot-page">
@@ -342,11 +396,16 @@ export default function PlotPage() {
           )}
 
           <h3>Paper</h3>
+          {plotterPaper && connected === true && (
+            <p className="muted small" data-testid="plotter-paper-hint">
+              Plotter: {plotterPaper.toUpperCase()} (hard-clip detected)
+            </p>
+          )}
           <div className="paper-select" role="radiogroup" aria-label="paper size">
             {PAPER_NAMES.map((p) => (
               <label key={p} className={p === paper ? "selected" : ""}>
                 <input type="radio" name="paper" value={p} checked={p === paper}
-                  onChange={() => setPaper(p)} />
+                  onChange={() => { paperTouched.current = true; setPaper(p); }} />
                 {p.toUpperCase()}
                 {papers[p] && <span className="muted small"> · {papers[p].size_mm[0].toFixed(0)}×{papers[p].size_mm[1].toFixed(0)} mm</span>}
               </label>
@@ -357,6 +416,20 @@ export default function PlotPage() {
               ⚠ DIP-mode hint: {papers[paper].dip_mode} — {papers[paper].info}
             </p>
           )}
+          {paperMismatch && (
+            <div className="banner warn" role="alert" data-testid="paper-mismatch-warning">
+              Plotter is configured for {plotterPaper!.toUpperCase()} — plotting {paper.toUpperCase()} will be rejected/clamped.
+            </div>
+          )}
+
+          <h3>Scale</h3>
+          <div className="scale-row">
+            <input type="range" min={25} max={100} step={5} value={scale}
+              aria-label="plot scale" data-testid="scale-slider"
+              onChange={(e) => setScale(Number(e.target.value))} />
+            <span className="scale-readout" data-testid="scale-readout">{scale}%</span>
+          </div>
+          <p className="muted small">Fraction of best-fit size. 100% fits the drawing to the selected paper.</p>
 
           <div className="row-actions">
             <button className="primary" disabled={!file || preparing || pensUsed.length === 0}
@@ -374,7 +447,7 @@ export default function PlotPage() {
       <section className="panel preview-panel">
         <h2>3 · Preview & plot</h2>
         <PagePreview svg={previewSvg} error={previewError}
-          paper={papers[paper] ?? null} paperName={paper} />
+          paper={papers[paper] ?? null} paperName={paper} scalePct={scale} />
         {job && (
           <div className="job-live" data-testid="job-live">
             <div className="row">

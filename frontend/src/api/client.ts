@@ -5,7 +5,7 @@
 
 import type {
   Analysis, AppSettings, ConnectBody, ConnectResult, DeviceError, DeviceStatus,
-  Job, JobCreateBody, PaperInfo, PortInfo, SanitizeReport, UploadSvgResult,
+  HardClip, Job, JobCreateBody, PaperInfo, PortInfo, SanitizeReport, UploadSvgResult,
 } from "./types";
 
 const BASE: string = import.meta.env.VITE_API_BASE ?? "/api";
@@ -75,6 +75,9 @@ export const api = {
   identify: () => post("/device/identify"),
   deviceStatus: () => req<DeviceStatus>("/device/status"),
   deviceError: () => req<DeviceError>("/device/error"),
+  /** Plotter's current hard-clip window + detected paper (DIP switches);
+   *  paper is null (or the call errors) while disconnected. */
+  hardClip: () => req<HardClip>("/device/hard-clip"),
 
   selectPen: (pen: number) => post(`/device/pen/${pen}`),
   penUp: () => post("/device/pen-up"),

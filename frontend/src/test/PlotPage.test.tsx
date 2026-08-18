@@ -16,6 +16,7 @@ vi.mock("../api/client", async (importOriginal) => {
     api: {
       ...actual.api,
       deviceStatus: vi.fn(),
+      hardClip: vi.fn(),
       getPapers: vi.fn(),
       uploadSvg: vi.fn(),
       analysis: vi.fn(),
@@ -47,6 +48,7 @@ beforeEach(() => {
   FakeWebSocket.reset();
   vi.stubGlobal("WebSocket", FakeWebSocket);
   mockApi.deviceStatus.mockResolvedValue({ connected: true, port: "/dev/ttyUSB0", settings: null, status: { status: 16 } });
+  mockApi.hardClip.mockResolvedValue({ limits: [0, 0, 11040, 7721], paper: "a4" });
   mockApi.getPapers.mockResolvedValue({
     a4: { size_mm: [297, 210], x_range: [0, 11040], y_range: [0, 7721], dip_mode: "metric", info: "Plotter must be configured in Metric mode (rear DIP)." },
     a3: { size_mm: [420, 297], x_range: [0, 16158], y_range: [0, 11040], dip_mode: "metric", info: "" },
@@ -238,5 +240,88 @@ describe("PlotPage", () => {
     });
     expect(await screen.findByText("SENDING")).toBeInTheDocument();
     expect(screen.getByRole("progressbar").textContent).toContain("25.0%");
+  });
+
+  /** Upload helper for the paper/scale tests: de-nested findBy (awaiting a
+   *  query inside act() triggers React's act-environment console.error). */
+  async function uploadDrawing() {
+    const input = await screen.findByLabelText("SVG file");
+    await act(async () => {
+      fireEvent.change(input, {
+        target: { files: [new File(["<svg/>"], "drawing.svg")] },
+      });
+    });
+    await screen.findByTestId("analysis");
+  }
+
+  function mockPrepareFlow() {
+    mockApi.uploadSvg.mockResolvedValue({ id: "f1", name: "drawing.svg", size: 100, sanitize: {} });
+    mockApi.analysis.mockResolvedValue({ layers: ["cut"], stroke_colors: [], unsupported: [] });
+    mockApi.createJob.mockResolvedValue({ ...JOB });
+    mockApi.prepareJob.mockResolvedValue({ accepted: true });
+  }
+
+  it("defaults paper to the hard-clip detected size and shows the hint", async () => {
+    mockApi.hardClip.mockResolvedValue({ limits: [0, 0, 16158, 11040], paper: "a3" });
+    mockPrepareFlow();
+    render(ui(<PlotPage />));
+    await uploadDrawing();
+    expect(screen.getByTestId("plotter-paper-hint")).toHaveTextContent("Plotter: A3");
+    expect(screen.getByRole("radio", { name: /A3/ })).toBeChecked();
+  });
+
+  it("warns when picked paper is larger than the plotter's", async () => {
+    mockPrepareFlow();
+    render(ui(<PlotPage />));
+    await uploadDrawing();
+    await screen.findByTestId("plotter-paper-hint"); // default mock: a4
+    fireEvent.click(screen.getByRole("radio", { name: /A3/ }));
+    expect(screen.getByTestId("paper-mismatch-warning"))
+      .toHaveTextContent("Plotter is configured for A4 — plotting A3 will be rejected/clamped");
+  });
+
+  it("selecting A3 puts paper a3 in createJob payload", async () => {
+    mockPrepareFlow();
+    render(ui(<PlotPage />));
+    await uploadDrawing();
+    fireEvent.click(screen.getByRole("radio", { name: /A3/ }));
+    await act(async () => { fireEvent.click(screen.getByTestId("prepare-btn")); });
+    expect(mockApi.createJob).toHaveBeenCalledWith(expect.objectContaining({ paper: "a3" }));
+  });
+
+  it("scale slider value is sent as a 0-1 fraction in createJob payload", async () => {
+    mockPrepareFlow();
+    render(ui(<PlotPage />));
+    await uploadDrawing();
+    fireEvent.change(screen.getByTestId("scale-slider"), { target: { value: "50" } });
+    expect(screen.getByTestId("scale-readout")).toHaveTextContent("50%");
+    await act(async () => { fireEvent.click(screen.getByTestId("prepare-btn")); });
+    expect(mockApi.createJob).toHaveBeenCalledWith(expect.objectContaining({
+      paper: "a4", scale: 0.5, pen_map: { cut: 1 }, pen_map_mode: "layers",
+    }));
+  });
+
+  it("re-prepares (debounced 400ms) on scale change, keeping pen map", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      mockPrepareFlow();
+      render(ui(<PlotPage />));
+      await uploadDrawing();
+      await act(async () => { fireEvent.click(screen.getByTestId("prepare-btn")); });
+      expect(mockApi.createJob).toHaveBeenCalledTimes(1);
+
+      fireEvent.change(screen.getByTestId("scale-slider"), { target: { value: "50" } });
+      // still inside the 400ms debounce window
+      expect(mockApi.createJob).toHaveBeenCalledTimes(1);
+      await act(async () => { vi.advanceTimersByTime(400); });
+      await act(async () => {});
+      expect(mockApi.createJob).toHaveBeenCalledTimes(2);
+      expect(mockApi.createJob).toHaveBeenLastCalledWith(expect.objectContaining({
+        file_id: "f1", paper: "a4", scale: 0.5, pen_map: { cut: 1 }, pen_map_mode: "layers",
+      }));
+      expect(mockApi.prepareJob).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

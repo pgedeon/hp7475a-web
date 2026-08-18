@@ -35,8 +35,16 @@ export function extractViewBox(svg: string): { minX: number; minY: number; w: nu
  * travel geometry (e.g. stats.travel_moves) or canvas interactivity is needed.
  */
 export default function PagePreview({
-  svg, paper, error, paperName,
-}: { svg: string | null; paper: PaperInfo | null; paperName: string; error: string | null }) {
+  svg, paper, error, paperName, scalePct,
+}: {
+  svg: string | null;
+  paper: PaperInfo | null;
+  paperName: string;
+  error: string | null;
+  /** Plot scale in percent — shown in the caption so the user can see what
+   *  the preview corresponds to. */
+  scalePct?: number;
+}) {
   const safe = useMemo(() => (svg ? sanitizePreviewSvg(svg) : null), [svg]);
   const vb = useMemo(() => (svg ? extractViewBox(svg) : null), [svg]);
 
@@ -70,8 +78,9 @@ export default function PagePreview({
         {/* geometry (already pen-colored by the pipeline) */}
         <g dangerouslySetInnerHTML={{ __html: safe.includes("<svg") ? innerOf(safe) : safe }} />
       </svg>
-      <p className="small muted">
+      <p className="small muted" data-testid="preview-caption">
         {paperName.toUpperCase()} · {paperW.toFixed(0)}×{paperH.toFixed(0)} mm — red outline = hard-clip area
+        {` · ${scalePct ?? 100}% scale`}
         {paper ? ` · DIP: ${paper.dip_mode}` : ""}
       </p>
     </div>

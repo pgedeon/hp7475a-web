@@ -128,6 +128,25 @@ class HardwareWorker:
         try:
             if not self._devices.is_connected():
                 raise RuntimeError("device not connected")
+            # Paper/plotter containment (2026-08-18 vertical-lines fix):
+            # an A3 job on an A4-DIP plotter clamps coords into garbage
+            # edge lines. Best-effort here (routes validate authoritatively;
+            # skip when the clip query itself fails).
+            try:
+                clip = self._devices.hard_clip_limits()
+                from app.services.serial.paper import clip_fits, get_paper
+
+                if not clip_fits(get_paper(job.paper), tuple(clip["limits"])):
+                    raise RuntimeError(
+                        f"job paper {job.paper!r} exceeds the plotter's "
+                        f"plottable area (plotter reports {clip.get('paper')!r})"
+                        f" — coordinates would be clamped; re-create the job "
+                        f"with matching paper"
+                    )
+            except RuntimeError:
+                raise
+            except Exception:
+                pass
             if not job.hpgl.strip():
                 raise RuntimeError("job has no HP-GL payload (run the pipeline first)")
             self._store.update(job_id, bytes_total=len(job.hpgl.encode("ascii")), bytes_sent=0)

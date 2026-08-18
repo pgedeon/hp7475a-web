@@ -269,6 +269,7 @@ class JobCreateBody(BaseModel):
     file_id: str
     name: str = ""
     paper: str = "a4"
+    scale: float = Field(default=1.0, ge=0.25, le=1.0)
     pen_map: dict[str, int] = Field(default_factory=dict)
     pen_map_mode: str = "layers"  # "layers" | "colors" (goal 3e598c6e)
     options: dict[str, Any] = Field(default_factory=dict)
@@ -291,7 +292,8 @@ async def create_job(body: JobCreateBody, request: Request) -> dict:
     job = state.jobs.create(
         name=body.name or meta.name, file_id=body.file_id, paper=body.paper,
         pen_map=body.pen_map,
-        options={**body.options, "pen_map_mode": body.pen_map_mode},
+        options={**body.options, "pen_map_mode": body.pen_map_mode,
+                 "scale": body.scale},
     )
     return job.to_dict()
 
@@ -324,6 +326,58 @@ def _job_command(request: Request, job_id: str, command: str) -> dict:
     return {"accepted": True, "command": command, "job_id": job_id}
 
 
+def _annotate_preview(svg_text: str, paper: str, user_scale: float) -> str:
+    """Overlay paper outline + size/scale caption on a vpype preview SVG.
+
+    Gives the UI preview a visible sheet boundary so scale/paper choices
+    are judgeable at a glance (goal 91ce9220)."""
+    import re
+
+    m = re.search(
+        r'viewBox="([\d.eE+-]+) ([\d.eE+-]+) ([\d.eE+-]+) ([\d.eE+-]+)"', svg_text
+    )
+    if not m:
+        return svg_text
+    w, h = float(m.group(3)), float(m.group(4))
+    sw = max(1.0, w / 500)
+    overlay = (
+        f'<rect x="1" y="1" width="{w - 2:.1f}" height="{h - 2:.1f}" fill="none" '
+        f'stroke="#adb5bd" stroke-width="{sw:.2f}" '
+        f'stroke-dasharray="{w / 200:.1f},{w / 400:.1f}"/>'
+        f'<text x="{w * 0.02:.1f}" y="{h * 0.035:.1f}" font-family="sans-serif" '
+        f'font-size="{w / 38:.1f}" fill="#868e96">'
+        f'{paper.upper()} \u00b7 {round(user_scale * 100)}%</text>'
+    )
+    cut = svg_text.index(">", svg_text.index("<svg")) + 1
+    return svg_text[:cut] + overlay + svg_text[cut:]
+
+
+def _validate_paper_against_plotter(state, paper_name: str) -> None:
+    """Refuse papers larger than the plotter's DIP-switched clip (422).
+
+    Vertical-lines fix (2026-08-18): an A3 job on an A4-configured plotter
+    clamps every coordinate beyond the real clip into garbage edge lines.
+    Skipped when the device is disconnected or the clip query fails —
+    prepare's device check still gates the rest."""
+    if not state.devices.is_connected():
+        return
+    try:
+        clip = state.devices.hard_clip_limits()
+    except Exception:
+        return
+    from app.services.serial.paper import clip_fits, get_paper
+
+    if not clip_fits(get_paper(paper_name), tuple(clip["limits"])):
+        detected = clip.get("paper") or "unknown"
+        raise HTTPException(
+            422,
+            f"job paper {paper_name!r} exceeds the plotter's plottable area "
+            f"(plotter reports {detected!r} — check rear DIP switches). "
+            f"Beyond-clip coordinates get clamped into vertical garbage "
+            f"lines. Re-create the job with paper={detected!r}.",
+        )
+
+
 @router.post("/jobs/{job_id}/prepare")
 async def prepare_job(job_id: str, request: Request) -> dict:
     state = get_state(request)
@@ -332,6 +386,7 @@ async def prepare_job(job_id: str, request: Request) -> dict:
         job = state.jobs.get(job_id)
     except JobNotFound:
         raise HTTPException(404, "job not found")
+    _validate_paper_against_plotter(state, job.paper)
     if not job.hpgl and job.file_id:
         from app.services.pipeline.vpy import PipelineOptions, run_pipeline  # pipeline lane
 
@@ -356,9 +411,12 @@ async def prepare_job(job_id: str, request: Request) -> dict:
             preview_dir.mkdir(parents=True, exist_ok=True)
             preview_path = preview_dir / f"{job_id}.svg"
             try:
-                preview_path.write_text(
-                    Path(result.preview_svg_path).read_text(encoding="utf-8")
+                pv_text = Path(result.preview_svg_path).read_text(encoding="utf-8")
+                _stats = result.stats or {}
+                pv_text = _annotate_preview(
+                    pv_text, job.paper, float(_stats.get("user_scale", 1.0))
                 )
+                preview_path.write_text(pv_text)
             except OSError:
                 preview_path = preview_dir / job_id  # placeholder on failure
                 preview_path.write_text(

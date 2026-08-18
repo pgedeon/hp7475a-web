@@ -78,6 +78,11 @@ class FakeDriver:
     def position(self):
         return (0.0, 0.0, False)
 
+    def hard_clip_limits(self):
+        # A4 DIP-switch configuration — same shape as the real driver's
+        # OH; tuple return; lets the paper-containment validation run.
+        return (0, 0, 11040, 7721)
+
     def select_pen(self, n):
         self.log.append(f"SP{n}")
         return None
@@ -165,6 +170,17 @@ def _upload_hpgl(client: TestClient, hpgl: str = "IN;SP1;PU100,100;PD200,200;SP0
     r = client.post(
         "/api/files/hpgl",
         files={"file": ("test.hpgl", hpgl.encode("ascii"), "application/octet-stream")},
+    )
+    assert r.status_code == 200, r.text
+    return r.json()["id"]
+
+
+def _upload_svg(client: TestClient, svg: bytes | None = None) -> str:
+    """Upload a benign SVG (or *svg* override) and return its file id."""
+    payload = svg if svg is not None else _BENIGN_SVG
+    r = client.post(
+        "/api/files/svg",
+        files={"file": ("test.svg", payload, "image/svg+xml")},
     )
     assert r.status_code == 200, r.text
     return r.json()["id"]
@@ -371,3 +387,46 @@ def test_ws_status_smoke(client):
         client.post("/api/device/disconnect")
         msg = ws.receive_text()
         assert "type" in msg
+
+
+@requires_pipeline
+def test_prepare_rejects_paper_larger_than_plotter(client):
+    """Vertical-lines regression (2026-08-18): A3 job on an A4-DIP plotter
+    clamps beyond-clip coordinates into garbage lines — prepare must 422."""
+    file_id = _upload_svg(client)
+    job_id = client.post(
+        "/api/jobs", json={"file_id": file_id, "paper": "a3"}
+    ).json()["id"]
+    client.post("/api/device/connect", json={"port": "/dev/null-fake"})
+    r = client.post(f"/api/jobs/{job_id}/prepare")
+    assert r.status_code == 422, r.text
+    assert "exceeds the plotter" in r.text
+    assert "a4" in r.text.lower()
+
+
+@requires_pipeline
+def test_job_scale_flows_to_pipeline_and_preview(client):
+    file_id = _upload_svg(client)
+    r = client.post(
+        "/api/jobs", json={"file_id": file_id, "paper": "a4", "scale": 0.5}
+    )
+    assert r.status_code == 200, r.text
+    job_id = r.json()["id"]
+    assert r.json()["options"]["scale"] == 0.5
+    # scale out of range rejected by validation
+    bad = client.post(
+        "/api/jobs", json={"file_id": file_id, "paper": "a4", "scale": 1.5}
+    )
+    assert bad.status_code == 422
+    client.post("/api/device/connect", json={"port": "/dev/null-fake"})
+    assert client.post(f"/api/jobs/{job_id}/prepare").status_code == 200
+    for _ in range(100):
+        job = client.get(f"/api/jobs/{job_id}").json()
+        if job["status"] in ("READY", "FAILED"):
+            break
+        time.sleep(0.05)
+    assert job["status"] == "READY", job
+    assert job["stats"]["pipeline"]["user_scale"] == 0.5
+    pv = client.get(f"/api/jobs/{job_id}/preview")
+    assert pv.status_code == 200
+    assert "A4" in pv.text and "50%" in pv.text

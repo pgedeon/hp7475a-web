@@ -106,10 +106,19 @@ export interface JobCreateBody {
   file_id: string;
   name?: string;
   paper: string;
+  /** Plot scale as a fraction of best-fit (0.25–1.0); backend default 1.0. */
+  scale?: number;
   /** "layers" (default) | "colors" — selects pen_map key semantics. */
   pen_map_mode?: PenMapMode;
   pen_map: Record<string, number>;
   options: Record<string, unknown>;
+}
+
+/** Hard-clip window reported by the plotter (OH command), in plotter units,
+ *  plus the paper size its DIP switches encode; null when disconnected. */
+export interface HardClip {
+  limits: [number, number, number, number];
+  paper: string | null;
 }
 
 export interface PaperInfo {
