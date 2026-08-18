@@ -11,7 +11,7 @@ Legend: `TODO` → `IN PROGRESS` → `DONE` (tested) · `READY FOR USER HARDWARE
 - [x] DONE — Repo scaffold + GitHub remote (pgedeon/hp7475a-web, public)
 - [x] DONE — protocol.py + paper.py single-source modules
 
-## Phase 2 — Serial transport
+## Phase 2 — Serial transport  *(delegated: serial-core)*
 
 - [ ] IN PROGRESS — Port discovery (`serial.tools.list_ports`, by-id preference, FTDI flag, permission check)
 - [ ] TODO — Connection lifecycle + settings validation (9600 8N1 default, editable)
@@ -28,7 +28,7 @@ Legend: `TODO` → `IN PROGRESS` → `DONE` (tested) · `READY FOR USER HARDWARE
 - [ ] TODO — Cancel semantics: stop-sending vs device reset (documented only)
 - [ ] TODO — Tests with fake plotter
 
-## Phase 4 — SVG pipeline
+## Phase 4 — SVG pipeline  *(delegated: svg-pipeline)*
 
 - [ ] TODO — Secure upload (size cap, sanitize: scripts/events/XXE/foreignObject/external refs)
 - [ ] TODO — Analyzer: layers (Inkscape), groups, stroke colors, unsupported-content report (text, raster, filters…)
