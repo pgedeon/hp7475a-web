@@ -95,7 +95,13 @@ describe("bisect", () => {
       fireEvent.change(input, { target: { files: [new File(["<svg/>"], "drawing.svg")] } });
     });
     console.log("C uploaded");
-    await screen.findByTestId("analysis");
+    for (let i = 0; i < 15; i++) {
+      const el = document.querySelector('[data-testid="analysis"]');
+      console.log("poll", i, "found:", !!el, "bodyLen:", document.body.innerHTML.length);
+      if (el) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    expect(screen.getByTestId("analysis")).toBeInTheDocument();
     console.log("C analysis");
     await act(async () => {
       fireEvent.click(screen.getByTestId("prepare-btn"));
