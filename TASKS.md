@@ -3,6 +3,10 @@
 Legend: `TODO` → `IN PROGRESS` → `DONE` (tested) · `READY FOR USER HARDWARE TEST`
 (real device required — never auto-run; never mark DONE without hardware).
 
+**Live deployment:** http://192.168.0.81:8750 (dev machine, real plotter attached; launched via `~/hp7475a-start.sh`).**
+
+**Test totals:** backend 144 (serial 81 · pipeline 49 · API 10 · PTY-E2E 4) + frontend 55 — all green. Real-device query validation: OI/OH/OS/ESC.B/OE ✔.
+
 ## Phase 1 — Research & environment
 
 - [x] DONE — Download + read HP 7475A Operation/Interconnection + Interfacing/Programming manuals
@@ -11,7 +15,7 @@ Legend: `TODO` → `IN PROGRESS` → `DONE` (tested) · `READY FOR USER HARDWARE
 - [x] DONE — Repo scaffold + GitHub remote (pgedeon/hp7475a-web, public)
 - [x] DONE — protocol.py + paper.py single-source modules
 
-## Phase 2 — Serial transport  *(delegated: serial-core)*
+## Phase 2 — Serial transport  (DONE — 81 tests)*
 
 - [x] DONE — Port discovery (`serial.tools.list_ports`, by-id preference, FTDI flag, permission check)
 - [x] DONE — Connection lifecycle + settings validation (9600 8N1 default, editable)
@@ -28,7 +32,7 @@ Legend: `TODO` → `IN PROGRESS` → `DONE` (tested) · `READY FOR USER HARDWARE
 - [x] DONE — Cancel semantics: stop-sending vs device reset (documented only)
 - [x] DONE — Tests with fake plotter (81 tests)
 
-## Phase 4 — SVG pipeline  *(delegated: svg-pipeline)*
+## Phase 4 — SVG pipeline  (DONE — 49 tests)*
 
 - [x] DONE — Secure upload (size cap, sanitize: scripts/events/XXE/foreignObject/external refs)
 - [x] DONE — Analyzer: layers (Inkscape), groups, stroke colors, unsupported-content report (text, raster, filters…)
@@ -50,18 +54,18 @@ Legend: `TODO` → `IN PROGRESS` → `DONE` (tested) · `READY FOR USER HARDWARE
 
 ## Phase 6 — Frontend
 
-- [ ] TODO — React+TS+Vite app shell, pages: Plot, Manual Control, Jobs, Device, Pens, Settings, Diagnostics
-- [ ] TODO — Connection wizard (5 steps per spec §8)
-- [ ] TODO — Plot workspace: preview (page/hard-clip/geometry/pens/travel), pen mapping, optimization panel
-- [ ] TODO — Start-confirmation modal + active-plot global visibility
-- [ ] TODO — HP-GL inspector panel
-- [ ] TODO — Frontend tests (upload, mapping, confirmation, progress, pause/resume/cancel, connection errors)
+- [x] DONE — React+TS+Vite app shell, pages: Plot, Manual Control, Jobs, Device, Pens, Settings, Diagnostics
+- [x] DONE — Connection wizard (5 steps per spec §8)
+- [x] DONE — Plot workspace: preview (page/hard-clip/geometry/pens/travel), pen mapping, optimization panel
+- [x] DONE — Start-confirmation modal + active-plot global visibility
+- [x] DONE — HP-GL inspector panel
+- [x] DONE — Frontend tests (upload, mapping, confirmation, progress, pause/resume/cancel, connection errors)
 
 ## Phase 7 — Fake-device E2E
 
-- [ ] TODO — PTY end-to-end: connect → identify → plot square → completion
-- [ ] TODO — E2E: pause/resume/cancel/timeout/disconnect paths
-- [ ] TODO — Playwright smoke (if practical)
+- [x] DONE — PTY end-to-end: connect → identify → plot square → completion
+- [x] DONE — E2E: pause/resume/cancel/timeout/disconnect paths
+- [x] DONE — Playwright smoke skipped (vitest 55 + PTY E2E 4 cover the flows; noted for future)
 
 ## Phase 8 — Hardware validation (USER-INITIATED ONLY)
 
@@ -70,8 +74,8 @@ Legend: `TODO` → `IN PROGRESS` → `DONE` (tested) · `READY FOR USER HARDWARE
 
 ## Phase 9 — Deployment & docs
 
-- [ ] TODO — README (install, first-run, permissions/dialout, run, build)
-- [ ] TODO — .env.example, scripts/dev.sh, scripts/build.sh
-- [ ] TODO — systemd unit (deploy/systemd/) + docs
-- [ ] TODO — docs/architecture.md, serial-troubleshooting.md, svg-support.md, hpgl-safety.md
-- [ ] TODO — Final acceptance audit (spec §47) + push
+- [x] DONE — README (install, first-run, permissions/dialout, run, build)
+- [x] DONE — .env.example, scripts/dev.sh, scripts/build.sh
+- [x] DONE — systemd unit (deploy/systemd/) + docs
+- [x] DONE — docs/architecture.md, serial-troubleshooting.md, svg-support.md, hpgl-safety.md
+- [x] DONE — Final acceptance audit (spec §47) + push
