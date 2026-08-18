@@ -89,6 +89,28 @@ class PipelineOptions:
     velocity_cm_s: float | None = None
     landscape: bool = True
 
+    @classmethod
+    def from_dict(cls, raw: dict | "PipelineOptions | None") -> "PipelineOptions":
+        """Coerce an API/UI options dict (or None) into PipelineOptions.
+
+        Unknown keys are ignored; booleans/floats coerced defensively — the
+        HTTP layer stores whatever JSON the client sent.
+        """
+        if raw is None or isinstance(raw, cls):
+            return raw or cls()
+        fields = {f for f in cls.__dataclass_fields__}
+        clean: dict = {}
+        for k, v in raw.items():
+            if k not in fields or v is None:
+                continue
+            if k in ("margin_mm", "quantization_mm"):
+                clean[k] = float(v)
+            elif k == "velocity_cm_s":
+                clean[k] = float(v) if v is not None else None
+            else:
+                clean[k] = bool(v)
+        return cls(**clean)
+
 
 @dataclass
 class PipelineResult:
@@ -209,7 +231,8 @@ def run_pipeline(
         ValueError: unknown paper, no plottable geometry, bad pen numbers.
         RuntimeError: vpype emitted something the validator rejects.
     """
-    options = options or PipelineOptions()
+    options = PipelineOptions.from_dict(options) if not isinstance(
+        options, PipelineOptions) else options
     pen_map = pen_map or {}
     p = get_paper(paper)
 

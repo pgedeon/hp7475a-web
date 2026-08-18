@@ -311,7 +311,7 @@ async def prepare_job(job_id: str, request: Request) -> dict:
     except JobNotFound:
         raise HTTPException(404, "job not found")
     if not job.hpgl and job.file_id:
-        from app.services.pipeline.vpy import run_pipeline  # pipeline lane
+        from app.services.pipeline.vpy import PipelineOptions, run_pipeline  # pipeline lane
 
         try:
             meta = state.files.get(job.file_id)
@@ -321,7 +321,7 @@ async def prepare_job(job_id: str, request: Request) -> dict:
             try:
                 result = run_pipeline(
                     state.files.get(job.file_id).stored_path, job.paper,
-                    job.options, job.pen_map,
+                    PipelineOptions.from_dict(job.options), job.pen_map,
                 )
             except Exception as exc:
                 raise HTTPException(422, f"pipeline failed: {exc}")
