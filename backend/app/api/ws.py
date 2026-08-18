@@ -19,10 +19,13 @@ class WSHub:
         self._clients: dict[int, tuple[WebSocket, asyncio.AbstractEventLoop]] = {}
         self._next_id = 0
 
-    async def connect(self, ws: WebSocket) -> None:
+    async def connect(self, ws: WebSocket) -> int:
+        """Accept and register; returns the client id for disconnect()."""
         await ws.accept()
-        self._clients[self._next_id] = (ws, asyncio.get_running_loop())
+        cid = self._next_id
+        self._clients[cid] = (ws, asyncio.get_running_loop())
         self._next_id += 1
+        return cid
 
     def disconnect(self, client_id: int) -> None:
         self._clients.pop(client_id, None)

@@ -1,14 +1,16 @@
 """Device connection manager — owns the single serial connection lifecycle.
 
-Wraps the serial-core lane's discovery/driver (imported lazily so this module
-works in tests with injected fakes). The REST layer never touches pyserial
-directly; it goes through DeviceManager → HP7475ADevice.
+Also the serialization boundary: the serial-lane driver returns typed
+values (MoveResult/StatusReport dataclasses, tuples, None, str); this layer
+converts every passthrough into JSON-safe dicts for the API. Routes never
+see driver types.
 """
 
 from __future__ import annotations
 
 import logging
 import threading
+from dataclasses import asdict, is_dataclass
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -87,7 +89,7 @@ class DeviceManager:
             except Exception:
                 logger.exception("error closing device")
 
-    # -- passthrough helpers (guard + delegate) ---------------------------------
+    # -- passthrough helpers (guard + delegate + shape) -------------------------
 
     def _require_driver(self):
         driver = self.driver()
@@ -95,18 +97,52 @@ class DeviceManager:
             raise RuntimeError("device not connected")
         return driver
 
+    @staticmethod
+    def _dc(obj: Any) -> dict:
+        """Dataclass/None/dict-tolerant → dict shaping for API responses."""
+        if obj is None:
+            return {}
+        if is_dataclass(obj) and not isinstance(obj, type):
+            return asdict(obj)
+        if isinstance(obj, dict):
+            return obj
+        raise TypeError(f"unshapable driver result: {obj!r}")
+
     def identify(self) -> dict:
-        return self._require_driver().identify()
+        result = self._require_driver().identify()
+        return {"identity": result} if isinstance(result, str) else self._dc(result)
 
     def status(self) -> dict:
-        return self._require_driver().status()
+        return self._dc(self._require_driver().status())
 
     def error(self) -> dict:
         code, meaning = self._require_driver().errors()
         return {"hpgl": {"code": code, "meaning": meaning}}
 
     def position(self) -> dict:
-        return self._require_driver().position()
+        result = self._require_driver().position()
+        if isinstance(result, tuple):
+            return {"x": result[0], "y": result[1], "pen_down": result[2]}
+        return self._dc(result)
+
+    def select_pen(self, pen: int) -> dict:
+        self._require_driver().select_pen(pen)
+        return {"pen": pen}
+
+    def pen_up(self) -> dict:
+        self._require_driver().pen_up()
+        return {"pen_down": False}
+
+    def pen_down(self) -> dict:
+        self._require_driver().pen_down()
+        return {"pen_down": True}
+
+    def move(self, x: float, y: float) -> dict:
+        return self._dc(self._require_driver().move_abs(x, y))
+
+    def park(self) -> dict:
+        self._require_driver().park()
+        return {"parked": True}
 
     def hard_clip_limits(self) -> dict:
         xmin, ymin, xmax, ymax = self._require_driver().hard_clip_limits()
@@ -121,18 +157,3 @@ class DeviceManager:
 
     def buffer_space(self) -> int:
         return self._require_driver().buffer_space()
-
-    def select_pen(self, pen: int) -> dict:
-        return self._require_driver().select_pen(pen)
-
-    def pen_up(self) -> dict:
-        return self._require_driver().pen_up()
-
-    def pen_down(self) -> dict:
-        return self._require_driver().pen_down()
-
-    def move(self, x: float, y: float) -> dict:
-        return self._require_driver().move_abs(x, y)
-
-    def park(self) -> dict:
-        return self._require_driver().park()

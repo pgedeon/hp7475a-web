@@ -37,7 +37,9 @@ from app.services.files import FileRegistry
 
 
 class FakeDriver:
-    """Minimal driver double honoring the DeviceManager contract."""
+    """Driver double mirroring the REAL driver's return types
+    (dataclasses / tuples / None / str) so the DeviceManager shaping layer
+    is what the API tests exercise — dict-returning fakes once hid 4 bugs."""
 
     def __init__(self):
         self.transport = None
@@ -49,39 +51,56 @@ class FakeDriver:
 
     def connect(self):
         self.log.append("connect")
-        return {"identity": "7475A"}
+        return "7475A"
 
     def close(self):
         self.open = False
         self.log.append("close")
 
     def identify(self):
-        return {"identity": "7475A"}
+        return "7475A"
 
     def status(self):
-        return {"status": 24}
+        from dataclasses import dataclass
+
+        @dataclass
+        class _SR:
+            status_byte: int = 24
+            pen_down: bool = False
+            ready: bool = True
+            error: bool = False
+
+        return _SR()
 
     def errors(self):
-        return {"hpgl": 0, "extended": 0}
+        return (0, "No error")
 
     def position(self):
-        return {"x": 0.0, "y": 0.0, "pen_down": False}
+        return (0.0, 0.0, False)
 
     def select_pen(self, n):
         self.log.append(f"SP{n}")
-        return {"pen": n}
+        return None
 
     def pen_up(self):
-        return {"pen_down": False}
+        return None
 
     def pen_down(self):
-        return {"pen_down": True}
+        return None
 
     def move_abs(self, x, y):
-        return {"x": x, "y": y, "clamped": False}
+        from dataclasses import dataclass
+
+        @dataclass
+        class _MR:
+            x: float
+            y: float
+            clamped: bool = False
+
+        return _MR(x, y)
 
     def park(self):
-        return {"parked": True}
+        return None
 
     def initialize_device(self):
         return {}
@@ -275,3 +294,76 @@ def test_settings_roundtrip(client):
     r = client.put("/api/settings", json={"custom": {"theme": "dark"}})
     assert r.status_code == 200
     assert client.get("/api/settings").json()["custom"]["theme"] == "dark"
+
+
+_BENIGN_SVG = b'''<svg xmlns="http://www.w3.org/2000/svg" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" width="100mm" height="80mm" viewBox="0 0 100 80">
+ <g id="layer1" inkscape:label="1"><path d="M10,10 L90,10 L90,70 Z" fill="none" stroke="#ff0000"/></g>
+ <g id="layer2" inkscape:label="2"><rect x="20" y="20" width="30" height="30" fill="none" stroke="#00ff00"/></g>
+</svg>'''
+
+
+@requires_pipeline
+def test_svg_upload_returns_sanitize_dict(client):
+    """Regression: SanitizeReport dataclass once blew JSON serialization
+    (HTTP 500 'Upload failed' in the browser)."""
+    r = client.post(
+        "/api/files/svg",
+        files={"file": ("benign.svg", _BENIGN_SVG, "image/svg+xml")},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert isinstance(body["sanitize"], dict)
+    return body["id"]
+
+
+@requires_pipeline
+def test_svg_upload_rejects_unparseable(client):
+    """Fail-closed: unparseable XML must 422, never store an empty file."""
+    r = client.post(
+        "/api/files/svg",
+        files={"file": ("broken.svg", b"<svg><oops", "image/svg+xml")},
+    )
+    assert r.status_code == 422
+
+
+@requires_pipeline
+def test_analysis_endpoint_returns_dict(client):
+    """Regression: SvgAnalysis dataclass once not JSON serializable."""
+    r = client.post(
+        "/api/files/svg",
+        files={"file": ("benign.svg", _BENIGN_SVG, "image/svg+xml")},
+    )
+    assert r.status_code == 200, r.text
+    fid = r.json()["id"]
+    r = client.get(f"/api/files/{fid}/analysis")
+    assert r.status_code == 200, r.text
+    analysis = r.json()
+    assert isinstance(analysis, dict)
+    assert isinstance(analysis.get("layers"), list)
+
+
+@requires_serial
+def test_device_endpoints_shape_driver_types(client):
+    """Regression: MoveResult/None returns once failed response validation
+    (26× jog 500s). All endpoints must return JSON dicts now."""
+    client.post("/api/device/connect", json={"port": "/dev/null-fake"})
+    r = client.post("/api/device/identify")
+    assert r.status_code == 200 and r.json()["identity"] == "7475A"
+    r = client.post("/api/device/move", json={"x": 10, "y": 10, "units": "mm"})
+    assert r.status_code == 200 and isinstance(r.json(), dict)
+    assert "clamped" in r.json()
+    assert client.post("/api/device/pen/2").json() == {"pen": 2}
+    assert client.post("/api/device/pen-up").json() == {"pen_down": False}
+    assert client.post("/api/device/park").json() == {"parked": True}
+    status = client.get("/api/device/status").json()
+    assert isinstance(status["status"], dict)
+
+
+def test_ws_status_smoke(client):
+    """Regression: websocket route once required a Request arg FastAPI
+    never injects — every WS connect 500ed."""
+    with client.websocket_connect("/api/ws/status") as ws:
+        # trigger a publish from the app side (device event)
+        client.post("/api/device/disconnect")
+        msg = ws.receive_text()
+        assert "type" in msg

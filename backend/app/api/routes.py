@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import asdict, is_dataclass
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, UploadFile, File, WebSocket, WebSocketDisconnect
@@ -21,6 +22,14 @@ from app.jobs.worker import WorkerCommand
 from app.services.serial.paper import PAPERS
 
 logger = logging.getLogger(__name__)
+
+
+def _jsonable(obj: Any) -> Any:
+    """Route-boundary serializer: dataclasses → dicts (SanitizeReport,
+    SvgAnalysis, etc.); dicts/lists pass through."""
+    if is_dataclass(obj) and not isinstance(obj, type):
+        return asdict(obj)
+    return obj
 
 
 def get_state(request: Request):
@@ -197,12 +206,18 @@ async def upload_svg(request: Request, file: UploadFile = File(...)) -> dict:
         clean, report = sanitize_svg(raw, state.settings.max_upload_bytes)
     except ValueError as exc:
         raise HTTPException(422, str(exc))
+    if getattr(report, "rejected", False) or not clean:
+        # fail-closed: rejected input is NEVER stored (sanitizer returns
+        # empty bytes on rejection — callers must not proceed)
+        raise HTTPException(
+            422, {"message": "SVG rejected", "sanitize": _jsonable(report)}
+        )
     meta = state.files.save(
         kind="svg", name=file.filename or "upload.svg", content=clean,
-        extra={"sanitize_report": report},
+        extra={"sanitize_report": _jsonable(report)},
     )
     return {"id": meta.id, "name": meta.name, "size": meta.size_bytes,
-            "sanitize": report}
+            "sanitize": _jsonable(report)}
 
 
 @router.post("/files/hpgl")
@@ -238,8 +253,11 @@ async def file_analysis(file_id: str, request: Request) -> dict:
     if meta.kind != "svg":
         raise HTTPException(422, "analysis is for SVG files")
     if meta.analysis:
-        return meta.analysis
-    analysis = analyze_svg(state.files.read_bytes(file_id))
+        return _jsonable(meta.analysis) if not isinstance(meta.analysis, dict) else meta.analysis
+    data = state.files.read_bytes(file_id)
+    if not data:
+        raise HTTPException(422, "stored file is empty (rejected upload?)")
+    analysis = _jsonable(analyze_svg(data))
     meta.analysis = analysis
     state.files.update(meta)
     return analysis
@@ -447,10 +465,12 @@ async def papers() -> dict:
 # ---------------------------------------------------------------- websocket
 
 @router.websocket("/ws/status")
-async def ws_status(ws: WebSocket, request: Request) -> None:
-    state = get_state(request)
-    await state.ws_hub.connect(ws)
-    cid = state.ws_hub._next_id - 1
+async def ws_status(ws: WebSocket) -> None:
+    """Live status socket. NOTE: FastAPI websocket routes do NOT receive a
+    Request object — app state is reached via ws.app (regression-tested
+    after this exact bug 500'd every WS connect on device)."""
+    state = ws.app.state.container
+    cid = await state.ws_hub.connect(ws)
     try:
         while True:
             # Client pings keep the socket alive; content ignored.
