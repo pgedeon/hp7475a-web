@@ -29,6 +29,11 @@ class DeviceManager:
         # serve cached data; manual pen/move commands fail closed.
         self._streaming = False
         self._cached_status: dict | None = None
+        # I/O lane: serializes EVERY hardware query even at idle — without
+        # it, a status poll's OS; reply can be consumed by a concurrent
+        # OH; (observed live 2026-08-18: "bad OH reply: '16'" — '16' is an
+        # OS; status byte). One serial port = one query at a time.
+        self._io_lock = threading.Lock()
 
     # -- connection state -----------------------------------------------------
 
@@ -142,7 +147,8 @@ class DeviceManager:
 
     def identify(self) -> dict:
         self._check_hardware_free("identify")
-        result = self._require_driver().identify()
+        with self._io_lock:
+            result = self._require_driver().identify()
         return {"identity": result} if isinstance(result, str) else self._dc(result)
 
     def status(self) -> dict:
@@ -151,48 +157,58 @@ class DeviceManager:
         if self.streaming:
             cached = self._cached_status or {}
             return {"streaming": True, "stale": True, **cached}
-        result = self._dc(self._require_driver().status())
+        with self._io_lock:
+            result = self._dc(self._require_driver().status())
         self._cached_status = result
         return result
 
     def error(self) -> dict:
         self._check_hardware_free("error query")
-        code, meaning = self._require_driver().errors()
+        with self._io_lock:
+            code, meaning = self._require_driver().errors()
         return {"hpgl": {"code": code, "meaning": meaning}}
 
     def position(self) -> dict:
         self._check_hardware_free("position query")
-        result = self._require_driver().position()
+        with self._io_lock:
+            result = self._require_driver().position()
         if isinstance(result, tuple):
             return {"x": result[0], "y": result[1], "pen_down": result[2]}
         return self._dc(result)
 
     def select_pen(self, pen: int) -> dict:
         self._check_hardware_free("select pen")
-        self._require_driver().select_pen(pen)
+        with self._io_lock:
+            self._require_driver().select_pen(pen)
         return {"pen": pen}
 
     def pen_up(self) -> dict:
         self._check_hardware_free("pen up")
-        self._require_driver().pen_up()
+        with self._io_lock:
+            self._require_driver().pen_up()
         return {"pen_down": False}
 
     def pen_down(self) -> dict:
         self._check_hardware_free("pen down")
-        self._require_driver().pen_down()
+        with self._io_lock:
+            self._require_driver().pen_down()
         return {"pen_down": True}
 
     def move(self, x: float, y: float) -> dict:
         self._check_hardware_free("move")
-        return self._dc(self._require_driver().move_abs(x, y))
+        with self._io_lock:
+            result = self._require_driver().move_abs(x, y)
+        return self._dc(result)
 
     def park(self) -> dict:
         self._check_hardware_free("park")
-        self._require_driver().park()
+        with self._io_lock:
+            self._require_driver().park()
         return {"parked": True}
 
     def hard_clip_limits(self) -> dict:
-        xmin, ymin, xmax, ymax = self._require_driver().hard_clip_limits()
+        with self._io_lock:
+            xmin, ymin, xmax, ymax = self._require_driver().hard_clip_limits()
         from app.services.serial.paper import PAPERS
 
         match = None
@@ -204,4 +220,5 @@ class DeviceManager:
 
     def buffer_space(self) -> int:
         self._check_hardware_free("buffer query")
-        return self._require_driver().buffer_space()
+        with self._io_lock:
+            return self._require_driver().buffer_space()

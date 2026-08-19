@@ -89,6 +89,10 @@ class PipelineOptions:
     #: (1.0 = largest safe fit inside margin; 0.5 = half that). Bounds-
     #: checked 0.25–1.0 at from_dict.
     scale: float = 1.0
+    #: user rotation of the drawing before placement, degrees clockwise;
+    #: multiples of 90 only (90 lets a portrait design fill A4's landscape
+    #: plottable area at near-full size).
+    rotate_deg: float = 0.0
     quantization_mm: float = 0.1
     velocity_cm_s: float | None = None
     landscape: bool = True
@@ -114,6 +118,11 @@ class PipelineOptions:
                 if not 0.25 <= s <= 1.0:
                     raise ValueError("scale must be between 0.25 and 1.0")
                 clean[k] = s
+            elif k == "rotate_deg":
+                r = float(v)
+                if r not in (0.0, 90.0, 180.0, 270.0):
+                    raise ValueError("rotate_deg must be 0, 90, 180 or 270")
+                clean[k] = r
             elif k == "velocity_cm_s":
                 clean[k] = float(v) if v is not None else None
             else:
@@ -289,6 +298,10 @@ def run_pipeline(
     quant_px = options.quantization_mm * _PX_PER_MM
     # click 8.4 quirk: options must precede the FILE argument in execute()
     cmds = ["read", "--quantization", f"{quant_px:g}", shlex.quote(str(svg_path))]
+    if options.rotate_deg:
+        # rotate about the bbox center (vpype default) BEFORE optimization
+        # and placement — placement then fit-scales the rotated geometry.
+        cmds.append(f"rotate {int(options.rotate_deg)}")
     if options.linemerge:
         cmds.append("linemerge")
     if options.linesimplify:
@@ -385,6 +398,7 @@ def run_pipeline(
         "paper": p.name,
         "fit_scale": round(_place_scale, 4),
         "user_scale": options.scale,
+        "rotate_deg": int(options.rotate_deg),
         "layers": layer_stats,
         "total_paths": sum(s["paths"] for s in layer_stats.values()),
         "pen_up_travel_mm": round(float(doc.pen_up_length()) / _PX_PER_MM, 2),

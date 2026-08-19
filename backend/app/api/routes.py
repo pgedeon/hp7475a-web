@@ -270,6 +270,7 @@ class JobCreateBody(BaseModel):
     name: str = ""
     paper: str = "a4"
     scale: float = Field(default=1.0, ge=0.25, le=1.0)
+    rotate_deg: float = Field(default=0.0)
     pen_map: dict[str, int] = Field(default_factory=dict)
     pen_map_mode: str = "layers"  # "layers" | "colors" (goal 3e598c6e)
     options: dict[str, Any] = Field(default_factory=dict)
@@ -282,6 +283,8 @@ async def create_job(body: JobCreateBody, request: Request) -> dict:
         raise HTTPException(422, f"paper must be one of {sorted(PAPERS)}")
     if body.pen_map_mode not in ("layers", "colors"):
         raise HTTPException(422, "pen_map_mode must be 'layers' or 'colors'")
+    if body.rotate_deg not in (0.0, 90.0, 180.0, 270.0):
+        raise HTTPException(422, "rotate_deg must be 0, 90, 180 or 270")
     try:
         meta = state.files.get(body.file_id)
     except FileNotFoundError:
@@ -293,7 +296,7 @@ async def create_job(body: JobCreateBody, request: Request) -> dict:
         name=body.name or meta.name, file_id=body.file_id, paper=body.paper,
         pen_map=body.pen_map,
         options={**body.options, "pen_map_mode": body.pen_map_mode,
-                 "scale": body.scale},
+                 "scale": body.scale, "rotate_deg": body.rotate_deg},
     )
     return job.to_dict()
 
@@ -326,7 +329,8 @@ def _job_command(request: Request, job_id: str, command: str) -> dict:
     return {"accepted": True, "command": command, "job_id": job_id}
 
 
-def _annotate_preview(svg_text: str, paper: str, user_scale: float) -> str:
+def _annotate_preview(svg_text: str, paper: str, user_scale: float,
+                      rotate_deg: float = 0.0) -> str:
     """Overlay paper outline + size/scale caption on a vpype preview SVG.
 
     Gives the UI preview a visible sheet boundary so scale/paper choices
@@ -346,7 +350,8 @@ def _annotate_preview(svg_text: str, paper: str, user_scale: float) -> str:
         f'stroke-dasharray="{w / 200:.1f},{w / 400:.1f}"/>'
         f'<text x="{w * 0.02:.1f}" y="{h * 0.035:.1f}" font-family="sans-serif" '
         f'font-size="{w / 38:.1f}" fill="#868e96">'
-        f'{paper.upper()} \u00b7 {round(user_scale * 100)}%</text>'
+        f'{paper.upper()} \u00b7 {round(user_scale * 100)}%'
+        f'{f" \u00b7 {int(rotate_deg)}\u00b0" if rotate_deg else ""}</text>'
     )
     cut = svg_text.index(">", svg_text.index("<svg")) + 1
     return svg_text[:cut] + overlay + svg_text[cut:]
@@ -414,7 +419,8 @@ async def prepare_job(job_id: str, request: Request) -> dict:
                 pv_text = Path(result.preview_svg_path).read_text(encoding="utf-8")
                 _stats = result.stats or {}
                 pv_text = _annotate_preview(
-                    pv_text, job.paper, float(_stats.get("user_scale", 1.0))
+                    pv_text, job.paper, float(_stats.get("user_scale", 1.0)),
+                    float(_stats.get("rotate_deg", 0.0)),
                 )
                 preview_path.write_text(pv_text)
             except OSError:

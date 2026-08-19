@@ -430,3 +430,54 @@ def test_job_scale_flows_to_pipeline_and_preview(client):
     pv = client.get(f"/api/jobs/{job_id}/preview")
     assert pv.status_code == 200
     assert "A4" in pv.text and "50%" in pv.text
+
+
+@requires_pipeline
+def test_prepare_survives_oh_query_flake(client, monkeypatch):
+    """Crossed-reply regression (2026-08-18): an OH; TransportMalformed
+    (e.g. an OS; poll's '16' consumed by the OH read) must SKIP paper
+    validation, not FAIL the job — exception-order bug in worker."""
+    from app.services.serial.transport import TransportMalformed
+
+    file_id = _upload_svg(client)
+    job_id = client.post(
+        "/api/jobs", json={"file_id": file_id, "paper": "a4"}
+    ).json()["id"]
+    client.post("/api/device/connect", json={"port": "/dev/null-fake"})
+    driver = client.app.state.container.devices.driver()
+
+    def flaky_oh():
+        raise TransportMalformed("bad OH reply: '16'")
+
+    monkeypatch.setattr(driver, "hard_clip_limits", flaky_oh)
+    assert client.post(f"/api/jobs/{job_id}/prepare").status_code == 200
+    for _ in range(100):
+        job = client.get(f"/api/jobs/{job_id}").json()
+        if job["status"] in ("READY", "FAILED"):
+            break
+        time.sleep(0.05)
+    assert job["status"] == "READY", job
+
+
+@requires_pipeline
+def test_rotate_deg_flows_to_pipeline_and_preview(client):
+    file_id = _upload_svg(client)
+    r = client.post(
+        "/api/jobs", json={"file_id": file_id, "paper": "a4", "rotate_deg": 90}
+    )
+    assert r.status_code == 200, r.text
+    assert client.post(
+        "/api/jobs", json={"file_id": file_id, "paper": "a4", "rotate_deg": 45}
+    ).status_code == 422
+    job_id = r.json()["id"]
+    client.post("/api/device/connect", json={"port": "/dev/null-fake"})
+    assert client.post(f"/api/jobs/{job_id}/prepare").status_code == 200
+    for _ in range(100):
+        job = client.get(f"/api/jobs/{job_id}").json()
+        if job["status"] in ("READY", "FAILED"):
+            break
+        time.sleep(0.05)
+    assert job["status"] == "READY", job
+    assert job["stats"]["pipeline"]["rotate_deg"] == 90
+    pv = client.get(f"/api/jobs/{job_id}/preview")
+    assert pv.status_code == 200 and "90°" in pv.text
