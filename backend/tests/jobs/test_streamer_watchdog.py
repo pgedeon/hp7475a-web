@@ -106,3 +106,29 @@ def test_oversized_instruction_refused_loudly():
     with pytest.raises(StreamerFatal, match="exceeds"):
         s.stream(payload, pause_event=threading.Event(),
                  cancel_event=threading.Event())
+
+
+def test_escb_desync_recovers_instead_of_aborting():
+    """2026-08-19 flake root cause: an ESC.B reply mashed from orphaned
+    fragments (e.g. 12021) must drain + retry, not StreamerFatal a
+    healthy plot (hpgl-buddy gh-15 lesson)."""
+    class DesyncTransport(StubTransport):
+        def __init__(self):
+            super().__init__(free=1024, error_code=0)
+            self.bad = 2  # first two queries return garbage numbers
+
+        def query(self, data, timeout, retries):
+            if b".B" in data and self.bad:
+                self.bad -= 1
+                return "12021"
+            return super().query(data, timeout, retries)
+
+    t = DesyncTransport()
+    s = ChunkedStreamer(t, safety_margin=8, default_chunk=64,
+                        query_timeout_s=0.05, max_retries=3,
+                        zero_free_poll_s=0.01, zero_free_max_wait_s=0.5)
+    short = "IN;SP1;PU10,10;PD20,30;PU0,0;SP0;"
+    sent = s.stream(short, pause_event=threading.Event(),
+                    cancel_event=threading.Event())
+    assert sent == len(short)
+    assert bytes(t.written) == short.encode()

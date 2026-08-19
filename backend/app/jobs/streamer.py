@@ -191,7 +191,13 @@ class ChunkedStreamer:
 
     def _query_free(self) -> int:
         """ESC.B query with bounded retries. Returns free bytes 0..1024.
-        Retries transient timeouts; a reply we cannot parse is fatal."""
+
+        Retries transient timeouts AND semantic desyncs — a parseable but
+        impossible value (e.g. '12021' read from mashed fragments of an
+        orphaned late reply, observed under UI-poll hammering 2026-08-19)
+        means the reply stream slipped, not that the plot died. Drain the
+        stale bytes and re-query; abort only when retries run out
+        (hpgl-buddy gh-15: no false interrupts on timeout/desync)."""
         last_exc: Exception | None = None
         for attempt in range(self._retries + 1):
             try:
@@ -202,17 +208,22 @@ class ChunkedStreamer:
                 )
                 value = int(reply.strip())
                 if not 0 <= value <= protocol.INPUT_BUFFER_BYTES:
-                    raise StreamerFatal(
+                    raise ValueError(
                         f"ESC.B reply out of range: {value}"
                     )
                 return value
-            except StreamerFatal:
-                raise
             except DeviceDisconnected:
                 raise
             except Exception as exc:
                 last_exc = exc
-                logger.warning("ESC.B attempt %d failed: %s", attempt + 1, exc)
+                logger.warning("ESC.B attempt %d desynced/failed: %s",
+                               attempt + 1, exc)
+                drain = getattr(self._transport, "drain", None)
+                if callable(drain):
+                    try:
+                        drain()
+                    except Exception:
+                        pass
                 threading.Event().wait(0.1 * (attempt + 1))
         raise StreamerFatal(f"ESC.B query failed after {self._retries + 1} attempts: {last_exc}")
 

@@ -73,8 +73,11 @@ def test_velocity_option_emits_vs():
     result = run_pipeline(
         BENIGN, "a4", PipelineOptions(velocity_cm_s=10.0), {"1": 1, "2": 2, "3": 3}
     )
-    # phase 2: VS is quantized to the 0.38 cm/s grid (brief F2)
-    assert "VS9.88;" in result.hpgl
+    # phase 2: VS is quantized to the 0.38 cm/s grid (brief F2); phase-fix
+    # 2026-08-19: per-pen form VS9.88,n emitted after each SP (a bare header
+    # VS bound to pen 0 and pens kept their default 38.1 cm/s)
+    assert "VS9.88,1;" in result.hpgl and "VS9.88,2;" in result.hpgl
+    assert "VS9.88;" not in result.hpgl.split("SP1;")[0]
     assert validate_hpgl(result.hpgl, "a4").errors == []
 
 
@@ -138,7 +141,9 @@ def test_velocity_alias_from_ui_key(tmp_path):
         '</svg>'
     )
     res = run_pipeline(str(svg), "a4", {"velocity": 10})
-    assert "VS9.88;" in res.hpgl, "velocity alias did not emit VS"
+    # per-pen form after SP (bare header VS applied to pen 0 and was ignored)
+    assert "SP1;VS9.88,1;" in res.hpgl, "per-pen VS not emitted after SP"
+    assert "VS9.88;" not in res.hpgl.split("SP1;")[0], "stale header VS present"
     assert res.stats["estimate"]["velocity_cm_s"] == 9.88
 
 

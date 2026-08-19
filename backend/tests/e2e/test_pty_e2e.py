@@ -183,9 +183,20 @@ def test_e2e_status_polls_during_stream_do_not_touch_port(stack, fake):
     stop = threading.Event()
     polled = {"n": 0, "touched_port": 0}
 
+    _TERMINAL = {JobState.COMPLETED, JobState.FAILED,
+                 JobState.CANCELLED, JobState.DISCONNECTED}
+
     def poller():
         while not stop.is_set():
             try:
+                # Count only polls issued while the job is genuinely
+                # non-terminal: after the worker's finally releases the
+                # streaming lane (immediately after the terminal state is
+                # set), a live status is CORRECT — counting it was a race
+                # in the test itself (observed flaky 2026-08-19).
+                if jobs.get(job.id).status in _TERMINAL:
+                    time.sleep(0.01)
+                    continue
                 s = devices.status()
                 polled["n"] += 1
                 if not s.get("stale"):

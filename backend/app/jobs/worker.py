@@ -156,8 +156,11 @@ class HardwareWorker:
                 raise RuntimeError("device not connected")
             # Paper/plotter containment (2026-08-18 vertical-lines fix):
             # an A3 job on an A4-DIP plotter clamps coords into garbage
-            # edge lines. Best-effort here (routes validate authoritatively;
-            # skip when the clip query itself fails).
+            # edge lines. A failed clip QUERY is non-fatal (skip validation)
+            # — TransportError IS a RuntimeError subclass, so catch it
+            # FIRST or a crossed reply fails the job (observed live:
+            # "bad OH reply: '16'" — an OS; poll's reply eaten by OH;).
+            from app.services.serial.transport import TransportError
             try:
                 clip = self._devices.hard_clip_limits()
                 from app.services.serial.paper import clip_fits, get_paper
@@ -169,10 +172,8 @@ class HardwareWorker:
                         f" — coordinates would be clamped; re-create the job "
                         f"with matching paper"
                     )
-            except RuntimeError:
-                raise
-            except Exception:
-                pass
+            except TransportError:
+                pass  # query flaked: skip validation, never fail the job
             if not job.hpgl.strip():
                 raise RuntimeError("job has no HP-GL payload (run the pipeline first)")
             self._store.update(job_id, bytes_total=len(job.hpgl.encode("ascii")), bytes_sent=0)
@@ -225,7 +226,16 @@ class HardwareWorker:
             # instruction, 2026-08-19) must NEVER report COMPLETED. Query the
             # DRIVER directly — the manager's error() is streaming-gated and
             # streaming is still held until the finally block.
-            code, meaning = driver.errors()
+            # OE integrity gate: io_lock-serialized, streaming-exempt (see
+            # DeviceManager.error_locked). Unparseable OE = reply desync —
+            # motion end is already proven by the OA sentinel — so warn and
+            # treat as clean; only a READABLE non-zero error condemns.
+            try:
+                rep = self._devices.error_locked()
+                code, meaning = rep["code"], rep["meaning"]
+            except Exception as exc:
+                logger.warning("OE gate unreadable for %s: %s", job_id, exc)
+                code, meaning = 0, ""
             if code:
                 self._safe_set_state(
                     job_id, JobState.FAILED,
@@ -342,7 +352,16 @@ class HardwareWorker:
                 timeout=self._settings.completion_timeout_s,
                 on_status=lambda rep: publish_progress(total_bytes, rep.pen_down),
             )
-            code, meaning = driver.errors()
+            # OE integrity gate: io_lock-serialized, streaming-exempt (see
+            # DeviceManager.error_locked). Unparseable OE = reply desync —
+            # motion end is already proven by the OA sentinel — so warn and
+            # treat as clean; only a READABLE non-zero error condemns.
+            try:
+                rep = self._devices.error_locked()
+                code, meaning = rep["code"], rep["meaning"]
+            except Exception as exc:
+                logger.warning("OE gate unreadable for %s: %s", job_id, exc)
+                code, meaning = 0, ""
             if code:
                 self._store.set_state(
                     job_id, JobState.FAILED,

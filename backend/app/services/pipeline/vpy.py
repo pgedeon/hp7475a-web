@@ -680,8 +680,14 @@ def run_pipeline(
     if not chunks:
         raise ValueError("SVG contains no plottable geometry")
 
-    # ---- assembly: header, SP per layer, final park ----
+    # ---- assembly: header, SP (+per-pen VS) per layer, final park ----
+    # VS is PER-PEN state (manual p.43, hpgl-buddy tokens.py: VS v[,pen]):
+    # a bare VS applies to the CURRENT pen. Emitting it in the header (as
+    # before) landed while pen 0 was current — pen 1 kept its default
+    # 38.1 cm/s and the user velocity was silently ignored (2026-08-19).
+    # The per-pen form right after each SP is unambiguous.
     header = protocol.HPGL_INIT + protocol.HPGL_DEFAULTS
+    vs_cmd = None
     if options.velocity_cm_s is not None:
         v = quantize_velocity(options.velocity_cm_s)
         if not (protocol.VELOCITY_MIN_CM_S <= options.velocity_cm_s
@@ -691,11 +697,14 @@ def run_pipeline(
                 f"{protocol.VELOCITY_MIN_CM_S}..{protocol.VELOCITY_MAX_CM_S} cm/s"
             )
         if abs(v - protocol.VELOCITY_MAX_CM_S) > 1e-9:  # default 38.1 → omit VS
-            header += f"VS{v:g};"
+            vs_cmd = f"VS{v:g},{{pen}};"
     corner_x, corner_y = park_position(p)
     hpgl = (
         header
-        + "".join(f"SP{pen};{geom}" for _lid, pen, geom in chunks)
+        + "".join(
+            f"SP{pen};" + (vs_cmd.format(pen=pen) if vs_cmd else "") + geom
+            for _lid, pen, geom in chunks
+        )
         + f"PU{corner_x},{corner_y};SP0;"
     )
 

@@ -151,9 +151,103 @@ def sanitize_svg(
         report.removals.append("DOCTYPE declaration removed")
 
     _clean_tree(root, report)
+    _strip_page_backgrounds(root, report)
 
     clean = ET.tostring(root, encoding="utf-8", xml_declaration=True)
     return clean, report
+
+
+_NON_RENDER_CONTAINERS = frozenset(
+    {"defs", "symbol", "clipPath", "mask", "pattern", "marker"}
+)
+
+
+def _style_declarations(style_value: str) -> dict[str, str]:
+    """Parse a ``style="a:b;c:d"`` attribute into a dict (lowercase keys)."""
+    out: dict[str, str] = {}
+    for chunk in style_value.split(";"):
+        if ":" not in chunk:
+            continue
+        k, _, v = chunk.partition(":")
+        out[k.strip().lower()] = v.strip()
+    return out
+
+
+def _strip_page_backgrounds(root: ET.Element, report: SanitizeReport) -> int:
+    """Remove fill-only, full-page background <rect> elements.
+
+    Vector exports routinely include an invisible page background (e.g.
+    ``<rect width="297" height="210" fill="white"/>``). A pen plotter cannot
+    fill, so the outline-only pipeline would draw its OUTLINE — a frame
+    around every plot that the user never sees in any viewer (2026-08-19
+    user report). Strip rects that are:
+
+    * fill-only: effective fill != none AND effective stroke == none
+      (inheritance-aware: presentation attrs and inline ``style`` from
+      ancestors count — a border rect inside ``<g stroke="black">`` is
+      VISIBLE content and must survive)
+    * full-page: covers >= 99% of the viewBox area
+    * untransformed, and not inside defs/symbol/clipPath/mask/pattern
+
+    Recorded in ``report.removals``. Idempotent: second run finds nothing.
+    """
+    vb = root.attrib.get("viewBox", "").replace(",", " ").split()
+    if len(vb) != 4:
+        return 0
+    try:
+        _vx, _vy, vw, vh = (float(v) for v in vb)
+    except ValueError:
+        return 0
+    if vw <= 0 or vh <= 0:
+        return 0
+    page_area = vw * vh
+    removed = 0
+
+    def _effective(el: ET.Element, fill: str | None,
+                   stroke: str | None) -> tuple[str | None, str | None]:
+        f, s = el.attrib.get("fill"), el.attrib.get("stroke")
+        style = el.attrib.get("style")
+        if style:
+            decls = _style_declarations(style)
+            f = decls.get("fill", f)
+            s = decls.get("stroke", s)
+        return (f if f is not None else fill,
+                s if s is not None else stroke)
+
+    def _walk(el: ET.Element, fill: str | None, stroke: str | None,
+              in_defs: bool) -> None:
+        nonlocal removed
+        fill, stroke = _effective(el, fill, stroke)
+        name = _localname(el.tag)
+        in_defs = in_defs or name in _NON_RENDER_CONTAINERS
+        if (name == "rect" and not in_defs
+                and "transform" not in el.attrib):
+            fillable = fill is not None and fill.strip().lower() != "none"
+            stroked = stroke is not None and stroke.strip().lower() != "none"
+            if fillable and not stroked:
+                try:
+                    x = float(el.attrib.get("x", "0"))
+                    y = float(el.attrib.get("y", "0"))
+                    w = float(el.attrib["width"])
+                    h = float(el.attrib["height"])
+                except (KeyError, ValueError):
+                    w = h = 0.0
+                if w > 0 and h > 0 and w * h >= 0.99 * page_area:
+                    parent_map = {c: p for p in root.iter() for c in p}
+                    parent = parent_map.get(el)
+                    if parent is not None:
+                        parent.remove(el)
+                        removed += 1
+                    return
+        for child in list(el):
+            _walk(child, fill, stroke, in_defs)
+
+    _walk(root, None, None, False)
+    if removed:
+        report.removals.append(
+            f"page background <rect> removed x{removed} "
+            "(fill-only, full-page: would have plotted as a frame)")
+    return removed
 
 
 def _clean_tree(root: ET.Element, report: SanitizeReport) -> None:

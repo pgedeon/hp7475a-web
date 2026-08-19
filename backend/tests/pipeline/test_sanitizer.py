@@ -105,3 +105,71 @@ def test_non_svg_root_rejected():
     clean, report = sanitize_svg(b"<html><body>x</body></html>")
     assert report.rejected
     assert any("root" in r.lower() for r in report.reasons)
+
+
+# -- page-background stripping (2026-08-19 user report: frame around plots) --
+
+_BG = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 297 210">'
+       "%s</svg>")
+
+
+def test_white_background_rect_stripped():
+    svg = _BG % ('<rect x="0" y="0" width="297" height="210" fill="white"/>'
+                 '<polyline points="10,10 50,50"/>')
+    clean, report = sanitize_svg(svg.encode())
+    assert report.ok
+    assert any("page background" in r for r in report.removals)
+    assert b"fill=\"white\"" not in clean
+    assert b"polyline" in clean  # real geometry survives
+
+
+def test_style_fill_background_stripped():
+    svg = _BG % ('<rect width="297" height="210" '
+                 'style="fill:#ffffff;fill-opacity:1"/>'
+                 '<circle cx="50" cy="50" r="10"/>')
+    clean, report = sanitize_svg(svg.encode())
+    assert any("page background" in r for r in report.removals)
+    assert b"circle" in clean
+
+
+def test_visible_border_in_stroked_group_survives():
+    svg = _BG % ('<rect x="0" y="0" width="297" height="210" fill="white"/>'
+                 '<g fill="none" stroke="black">'
+                 '<rect x="10" y="10" width="277" height="190"/></g>')
+    clean, report = sanitize_svg(svg.encode())
+    assert any("page background" in r for r in report.removals)
+    # the stroked group border must survive (inheritance-aware)
+    assert b'width="277"' in clean
+
+
+def test_partial_fill_only_rect_survives():
+    svg = _BG % ('<rect x="100" y="100" width="50" height="30" fill="red"/>'
+                 '<polyline points="1,1 2,2"/>')
+    clean, report = sanitize_svg(svg.encode())
+    assert not any("page background" in r for r in report.removals)
+    assert b'width="50"' in clean
+
+
+def test_stroked_full_page_rect_survives():
+    svg = _BG % ('<rect x="0" y="0" width="297" height="210" '
+                 'fill="none" stroke="black"/>')
+    clean, report = sanitize_svg(svg.encode())
+    assert not any("page background" in r for r in report.removals)
+    assert b'width="297"' in clean
+
+
+def test_no_viewbox_no_strip():
+    svg = ('<svg xmlns="http://www.w3.org/2000/svg" width="297mm" '
+           'height="210mm"><rect x="0" y="0" width="297" height="210" '
+           'fill="white"/></svg>')
+    clean, report = sanitize_svg(svg.encode())
+    assert not any("page background" in r for r in report.removals)
+
+
+def test_strip_is_idempotent():
+    svg = _BG % ('<rect x="0" y="0" width="297" height="210" fill="white"/>'
+                 '<polyline points="10,10 50,50"/>')
+    once, _ = sanitize_svg(svg.encode())
+    twice, report2 = sanitize_svg(once)
+    assert not any("page background" in r for r in report2.removals)
+    assert once == twice

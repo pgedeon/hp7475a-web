@@ -142,17 +142,32 @@ def validate_hpgl(text: str, paper: str | Paper | None) -> ValidationReport:
             continue
         if mnemonic == "VS":
             if args_blob:
-                vals, err = _num_args(mnemonic, args_blob, report, expect=1)
-                if not err and vals is not None:
-                    v = vals[0]
-                    if not (0 <= v <= protocol.VELOCITY_MAX_CM_S):
+                # VS v[,pen] — per-pen velocity (manual p.43; hpgl-buddy
+                # tokens.py: reals, 0..2 params). The pen form is what the
+                # pipeline emits after each SP so the velocity binds to the
+                # pen that will actually draw (bare VS applies to the
+                # current pen — pen 0 in a header, i.e. nobody).
+                vals, err = _num_args(mnemonic, args_blob, report, expect=None)
+                if not err and vals:
+                    if len(vals) > 2:
                         report.errors.append(
-                            f"VS {v} outside 0..{protocol.VELOCITY_MAX_CM_S} cm/s"
+                            f"VS: expected 1-2 parameter(s), got {len(vals)}"
                         )
-                    elif abs(v / protocol.VELOCITY_STEP_CM_S - round(v / protocol.VELOCITY_STEP_CM_S)) > 1e-6 and v != 0:
-                        report.warnings.append(
-                            f"VS {v} not a multiple of {protocol.VELOCITY_STEP_CM_S} cm/s"
-                        )
+                        vals = []
+                    if vals:
+                        v = vals[0]
+                        if not (0 <= v <= protocol.VELOCITY_MAX_CM_S):
+                            report.errors.append(
+                                f"VS {v} outside 0..{protocol.VELOCITY_MAX_CM_S} cm/s"
+                            )
+                        elif abs(v / protocol.VELOCITY_STEP_CM_S - round(v / protocol.VELOCITY_STEP_CM_S)) > 1e-6 and v != 0:
+                            report.warnings.append(
+                                f"VS {v} not a multiple of {protocol.VELOCITY_STEP_CM_S} cm/s"
+                            )
+                    if len(vals) == 2:
+                        pen = vals[1]
+                        if not (protocol.MIN_PEN <= pen <= protocol.MAX_PEN):
+                            report.errors.append(f"VS pen {pen} outside 0..6")
             continue
         if mnemonic in _FREESTYLE:
             continue  # payload arbitrary; no coordinate semantics to check

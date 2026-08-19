@@ -165,6 +165,22 @@ class PenBody(BaseModel):
     pen: int = Field(ge=1, le=6)
 
 
+@router.get("/device/io-error")
+async def device_io_error(request: Request) -> dict:
+    """RS-232 extended error (ESC .E). Reading it CLEARS the front-panel
+    ERROR light when the latch is I/O-side (e.g. 10 overlapping output
+    request from crossed queries, 15 framing, 16 buffer overflow)."""
+    state = get_state(request)
+    driver = state.devices.driver()
+    if driver is None:
+        raise HTTPException(409, "device not connected")
+    try:
+        code, meaning = driver.transport.extended_error()
+    except Exception as exc:
+        raise HTTPException(409, f"io error query failed: {exc}")
+    return {"io": {"code": code, "meaning": meaning}}
+
+
 @router.post("/device/pen/{number}")
 async def device_pen(number: int, request: Request) -> dict:
     if not 1 <= number <= 6:
@@ -532,6 +548,29 @@ async def prepare_job(job_id: str, request: Request) -> dict:
                                      "preview": str(preview_path)})
         elif meta.kind == "hpgl":
             payload = state.files.read_bytes(job.file_id).decode("ascii")
+            # Honor the velocity option for RAW HP-GL too (2026-08-19: the
+            # slider silently did nothing for raw files). Per-pen VS after
+            # each SPn — a bare VS would bind to the current pen (pen 0 in
+            # a header, i.e. nobody) and be ignored, same bug as the SVG
+            # pipeline's old header-VS.
+            _vel = job.options.get("velocity_cm_s", job.options.get("velocity"))
+            if _vel is not None:
+                from app.services.serial.protocol import (
+                    VELOCITY_MAX_CM_S, VELOCITY_MIN_CM_S,
+                )
+                from app.services.pipeline.vpy import quantize_velocity
+                v = float(_vel)
+                if not (VELOCITY_MIN_CM_S <= v <= VELOCITY_MAX_CM_S):
+                    raise HTTPException(422, f"velocity {v} outside "
+                                             f"{VELOCITY_MIN_CM_S}..{VELOCITY_MAX_CM_S} cm/s")
+                q = quantize_velocity(v)
+                if abs(q - VELOCITY_MAX_CM_S) > 1e-9:  # default → no VS
+                    import re as _re
+                    payload = _re.sub(
+                        r"(SP([1-6]);)",
+                        lambda m: f"{m.group(1)}VS{q:g},{m.group(2)};",
+                        payload,
+                    )
             from app.services.pipeline.validator import validate_hpgl as _vh
             from app.services.serial.paper import get_paper as _gp
             vr = _vh(payload, _gp(job.paper))

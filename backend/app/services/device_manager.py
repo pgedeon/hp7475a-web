@@ -120,6 +120,17 @@ class DeviceManager:
             return obj
         raise TypeError(f"unshapable driver result: {obj!r}")
 
+    def error_locked(self) -> dict:
+        """OE; under the I/O lock but EXEMPT from the streaming gate.
+
+        Used by the worker's completion gate: the plot's motion is already
+        confirmed finished (OA sentinel), so the query is safe — but it
+        must serialize with UI status polls (io_lock) while the streaming
+        lane is still held (released only in the worker's finally)."""
+        with self._io_lock:
+            code, meaning = self._require_driver().errors()
+        return {"code": code, "meaning": meaning}
+
     # -- streaming guard -------------------------------------------------------
 
     def set_streaming(self, active: bool) -> None:

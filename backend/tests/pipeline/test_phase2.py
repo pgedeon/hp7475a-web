@@ -102,8 +102,9 @@ def test_quantize_velocity(raw, expected):
 def test_vs_emitted_only_when_not_default():
     r = run_pipeline(BENIGN, "a4", PipelineOptions(velocity_cm_s=10.0),
                      {"1": 1, "2": 2, "3": 3})
-    assert r.hpgl.startswith("IN;DF;VS9.88;")
-    assert "VS" not in r.hpgl[12:]  # exactly once, in the prologue
+    # 2026-08-19: per-pen VS follows each SP (bare header VS bound to pen 0)
+    assert r.hpgl.startswith("IN;DF;SP")
+    assert r.hpgl.count("VS9.88,") == 3  # once per mapped pen (1,2,3)
 
     r_default = run_pipeline(BENIGN, "a4", PipelineOptions(velocity_cm_s=38.1),
                              {"1": 1, "2": 2, "3": 3})
