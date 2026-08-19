@@ -13,6 +13,33 @@ PTY fake plotter for automated tests · verified against the HP manuals.
 > Constants live in one place:
 > [`backend/app/services/serial/protocol.py`](backend/app/services/serial/protocol.py).
 
+## Screenshots
+
+**Plot — upload, sanitize report, analysis & configuration**
+(pen mapping, optimization, pen-velocity `VS`, tiling, rotation/margin, paper size,
+paper-fit table; live shot with a real artwork):
+
+![Plot page: upload + configure](docs/screenshots/plot-configure.png)
+
+**Device — connection wizard** (port discovery; flags FTDI adapters and shows the
+stable `/dev/serial/by-id` path; serial settings → identity check → paper check):
+
+![Device wizard](docs/screenshots/device-wizard.png)
+
+**Jobs — history with live progress** (bytes-sent progress bars, time estimates,
+per-job details / replot / delete):
+
+![Jobs history](docs/screenshots/jobs-history.png)
+
+**Manual — jog pad & pen control** (mm steps clamped to paper, move-to X/Y, pen
+select / up / down / park):
+
+![Manual control](docs/screenshots/manual-control.png)
+
+**Diagnostics — status byte, buffer monitor, error registers, raw WS events:**
+
+![Diagnostics](docs/screenshots/diagnostics.png)
+
 ## Features
 
 - **Connection wizard** — port discovery (prefers stable `/dev/serial/by-id`
