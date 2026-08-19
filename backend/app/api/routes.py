@@ -275,6 +275,10 @@ async def upload_hpgl(request: Request, file: UploadFile = File(...)) -> dict:
         text = raw.decode("ascii")
     except UnicodeDecodeError:
         raise HTTPException(422, "HP-GL must be ASCII")
+    from app.services.pipeline.pd_split import split_long_pd
+
+    text = split_long_pd(text)  # monster PD/PU -> <=240B (boundary-safe)
+    raw = text.encode("ascii")
     validation = validate_hpgl(text, None)
     if validation.errors:
         raise HTTPException(422, {"message": "HP-GL rejected", "validation": {"errors": validation.errors, "warnings": validation.warnings}})

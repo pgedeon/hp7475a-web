@@ -156,11 +156,8 @@ class HardwareWorker:
                 raise RuntimeError("device not connected")
             # Paper/plotter containment (2026-08-18 vertical-lines fix):
             # an A3 job on an A4-DIP plotter clamps coords into garbage
-            # edge lines. A failed clip QUERY is non-fatal (skip validation)
-            # — TransportError IS a RuntimeError subclass, so catch it
-            # FIRST or a crossed reply fails the job (observed live:
-            # "bad OH reply: '16'" — an OS; poll's reply eaten by OH;).
-            from app.services.serial.transport import TransportError
+            # edge lines. Best-effort here (routes validate authoritatively;
+            # skip when the clip query itself fails).
             try:
                 clip = self._devices.hard_clip_limits()
                 from app.services.serial.paper import clip_fits, get_paper
@@ -172,8 +169,10 @@ class HardwareWorker:
                         f" — coordinates would be clamped; re-create the job "
                         f"with matching paper"
                     )
-            except TransportError:
-                pass  # query flaked: skip validation, never fail the job
+            except RuntimeError:
+                raise
+            except Exception:
+                pass
             if not job.hpgl.strip():
                 raise RuntimeError("job has no HP-GL payload (run the pipeline first)")
             self._store.update(job_id, bytes_total=len(job.hpgl.encode("ascii")), bytes_sent=0)
@@ -221,6 +220,19 @@ class HardwareWorker:
                 timeout=self._settings.completion_timeout_s,
                 on_status=lambda rep: publish_progress(total_bytes, rep.pen_down),
             )
+            # Final data-integrity gate: a plot that executed with an HP-GL
+            # error (e.g. OE 2 "wrong number of parameters" from a mid-split
+            # instruction, 2026-08-19) must NEVER report COMPLETED. Query the
+            # DRIVER directly — the manager's error() is streaming-gated and
+            # streaming is still held until the finally block.
+            code, meaning = driver.errors()
+            if code:
+                self._safe_set_state(
+                    job_id, JobState.FAILED,
+                    error=f"plotter reported HP-GL error {code} ({meaning}) — "
+                          f"the drawing is likely corrupt",
+                )
+                return
             self._safe_set_state(job_id, JobState.COMPLETED)
             self._store.prune_history()
         except StreamInterrupted as exc:
@@ -231,6 +243,7 @@ class HardwareWorker:
                 # resume: re-stream from current offset
                 self._resume_stream(job_id)
             elif "cancelled" in reason:
+                self._safe_park_after_abort(job_id)
                 self._safe_set_state(job_id, JobState.CANCELLED)
             else:
                 self._safe_set_state(job_id, JobState.FAILED, error=reason)
@@ -242,6 +255,18 @@ class HardwareWorker:
             self._safe_set_state(job_id, JobState.FAILED, error=f"{type(exc).__name__}: {exc}")
         finally:
             self._devices.set_streaming(False)
+
+    def _safe_park_after_abort(self, job_id: str) -> None:
+        """Pen safety on cancel (hpgl-buddy abort pattern): ESC.K discards
+        any buffered motion immediately, then the pen is lifted so a
+        cancelled plot neither keeps drawing nor blots. Best-effort — a
+        park failure must not mask the cancellation."""
+        try:
+            driver = self._devices.driver()
+            if driver is not None:
+                driver.abort_and_park()
+        except Exception:
+            logger.exception("post-cancel park failed for %s", job_id)
 
     def _on_stream_progress(
         self, job_id: str, job_stats: dict, publish_progress, p
@@ -317,12 +342,21 @@ class HardwareWorker:
                 timeout=self._settings.completion_timeout_s,
                 on_status=lambda rep: publish_progress(total_bytes, rep.pen_down),
             )
+            code, meaning = driver.errors()
+            if code:
+                self._store.set_state(
+                    job_id, JobState.FAILED,
+                    error=f"plotter reported HP-GL error {code} ({meaning}) — "
+                          f"the drawing is likely corrupt",
+                )
+                return
             self._store.set_state(job_id, JobState.COMPLETED)
         except StreamInterrupted as exc:
             reason = str(exc)
             if "paused" in reason:
                 self._store.set_state(job_id, JobState.PAUSED)
             elif "cancelled" in reason:
+                self._safe_park_after_abort(job_id)
                 self._store.set_state(job_id, JobState.CANCELLED)
             else:
                 self._store.set_state(job_id, JobState.FAILED, error=reason)

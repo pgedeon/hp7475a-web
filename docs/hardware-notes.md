@@ -218,3 +218,43 @@ area, prepare fails 422 with the needed size and the max grid that fits
 ("reduce copies, spacing, or lower the scale option"). Pen sort runs AFTER
 tiling (whole-page travel optimization); SP order unchanged. Grid extents are
 reported in job stats (`stats.pipeline.grid_mm`).
+
+
+## 13. Mid-instruction chunk splits corrupt plots (2026-08-19, field-proven)
+
+**Finding (zigzag canary on real hardware):** the 7475A misparses an HP-GL
+instruction delivered in multiple chunks with escape queries interleaved —
+`OE` latches error 2 ("wrong number of parameters") and coordinates get
+misassembled into garbage lines, *despite byte-perfect delivery* (offline
+full-fidelity repro streamed 446 KB with zero drops and zero I/O errors and
+still the plot rotted). This corrupted every plot since the phase-2
+ChunkedStreamer; the phase-1 sender never split mid-instruction, which is
+why early plots were clean. The manual's incremental-parse claim does not
+survive interleaved `ESC .B` polls on real hardware. hpgl-buddy treats
+"an instruction is atomic" as a core planning rule (DESIGN.md §3; planner.py).
+
+**Fixes:**
+- Streamer `split_chunk` is boundary-only: a chunk ALWAYS ends at `;`; when
+  no boundary fits the window it retries with the full safe window
+  (`free - margin`), waits for the buffer to drain, or fails loudly if a
+  single instruction can never fit (message tells the user to split).
+- Pipeline output pre-splits PD/PU to <=240 chars (PD continuation from the
+  current position is geometry-identical). Raw HP-GL uploads are pre-split
+  the same way at the API (`pd_split.py`).
+- Completion gate: after `complete_plot`, `OE` is read — a non-zero HP-GL
+  error FAILS the job ("drawing is likely corrupt"). A corrupt plot can
+  never report COMPLETED anymore. (Uses the driver directly; the manager's
+  `error()` is streaming-gated.)
+- Cancel parks the pen: `ESC .K` (discard buffered graphics) + `PU;`
+  (hpgl-buddy abort pattern) — a cancelled plot stops drawing immediately.
+
+**Verification:** the hand-written 844-byte zigzag canary (672-char PD)
+latched OE 2 on the old code and plots clean (OE 0) on the fixed code.
+Suite: 248 passed (1 pre-existing WSL2 PTY env failure).
+
+**Also adopted from hpgl-buddy study:** `ESC .E` overflow watchdog in the
+streamer (stall + final), 320-byte safety margin (their empirical 128-byte
+reserve finding: filling to the exact `ESC .B` boundary overflowed real
+hardware), XON/XOFF stays off (garbles replies on USB adapters — their
+bench finding matches ours). See reports/hpgl-buddy-harvest.md for the full
+adopt/skip matrix (ESC.O watch, sheet preflight = future work).

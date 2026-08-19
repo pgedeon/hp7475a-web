@@ -143,6 +143,9 @@ class PipelineOptions:
         """
         if raw is None or isinstance(raw, cls):
             return raw or cls()
+        raw = dict(raw)  # alias translation below mutates
+        if "velocity" in raw and raw.get("velocity_cm_s") is None:
+            raw["velocity_cm_s"] = raw.get("velocity")  # UI slider key
         fields = {f for f in cls.__dataclass_fields__}
         clean: dict = {}
         for k, v in raw.items():
@@ -158,8 +161,10 @@ class PipelineOptions:
                 if not 0.25 <= s <= 1.0:
                     raise ValueError("scale must be between 0.25 and 1.0")
                 clean[k] = s
-            elif k == "velocity_cm_s":
-                clean[k] = float(v) if v is not None else None
+            elif k in ("velocity_cm_s", "velocity"):
+                # "velocity" = the UI's slider key (mismatch silently
+                # ignored user velocity 2026-08-19); accept both.
+                clean["velocity_cm_s"] = float(v) if v is not None else None
             elif k == "copies":
                 c = v if isinstance(v, dict) else {}
                 try:
@@ -283,6 +288,38 @@ def quantize_velocity(v: float) -> float:
     if abs(v - vmax) <= step / 2:
         return vmax
     return round(v / step) * step
+
+_PD_SPLIT_MAX = 240  # chars per PD instruction — fits any streamer window
+
+
+def _split_long_pd(hpgl: str, max_chars: int = _PD_SPLIT_MAX) -> str:
+    """Split over-long PD coordinate lists into <=max_chars commands.
+
+    PD continuation semantics: a new ``PD;`` continues from the current
+    position, so re-chunking the pair list is geometry-identical. Keeps
+    every instruction short enough that boundary-only streaming always
+    finds a ';' inside any window >= max_chars (7475A buffer safety,
+    2026-08-19 horizontal-garbage incident)."""
+    parts = hpgl.split(";")
+    out: list[str] = []
+    for cmd in parts:
+        if cmd.startswith("PD") and len(cmd) > max_chars:
+            pairs = re.findall(r"[-0-9]+,[-0-9]+", cmd)
+            chunk: list[str] = []
+            n = 2
+            for pair in pairs:
+                if n + len(pair) + 1 > max_chars and chunk:
+                    out.append("PD" + ",".join(chunk))
+                    chunk = []
+                    n = 2
+                chunk.append(pair)
+                n += len(pair) + 1
+            if chunk:
+                out.append("PD" + ",".join(chunk))
+        else:
+            out.append(cmd)
+    return ";".join(out)
+
 
 def _greedy_sort(lc: vp.LineCollection) -> None:
     """In-place greedy pen-up travel sort (the same algorithm as vpype's
@@ -662,6 +699,7 @@ def run_pipeline(
         + f"PU{corner_x},{corner_y};SP0;"
     )
 
+    hpgl = _split_long_pd(hpgl)
     report = validate_hpgl(hpgl, p)
     if report.errors:
         raise RuntimeError(

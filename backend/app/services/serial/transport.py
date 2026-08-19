@@ -314,6 +314,10 @@ class SerialTransport:
         if code == 16:
             raise PlotterBufferOverflow(f"plotter buffer overflow: {meaning}")
 
+    def extended_error(self) -> tuple[int, str]:
+        """Public ESC .E query for the streamer's overflow watchdog."""
+        return self._extended_error()
+
     def _buffer_space(self) -> int:
         """Query free input-buffer bytes via ESC .B (Prog. Manual §10-28)."""
         assert self._responder is not None

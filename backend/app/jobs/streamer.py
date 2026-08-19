@@ -40,6 +40,7 @@ class StreamProgress:
 class TransportLike(Protocol):
     def query(self, data: bytes, timeout: float, retries: int) -> str: ...
     def write(self, data: bytes) -> int: ...
+    def extended_error(self) -> tuple[int, str]: ...
 
 
 def split_chunk(payload: str, start: int, max_bytes: int) -> int:
@@ -57,9 +58,13 @@ def split_chunk(payload: str, start: int, max_bytes: int) -> int:
     cut = payload.rfind(";", start, window_end)
     if cut != -1:
         return cut + 1
-    # No terminator in window: mid-instruction split is safe (the plotter
-    # buffers the partial tail and resumes parsing as bytes arrive).
-    return window_end
+    # No terminator in window: NEVER split mid-instruction. Field evidence
+    # (2026-08-19 zigzag canary): a long PD delivered in mid-instruction
+    # pieces with ESC.B polls between them was misparsed by the real 7475A
+    # as OE error 2 ("wrong number of parameters") despite byte-perfect
+    # delivery; every plot since the phase-2 streamer landed was corrupted
+    # this way. An instruction is atomic — wait for a bigger window.
+    return -1
 
 
 class ChunkedStreamer:
@@ -111,26 +116,44 @@ class ChunkedStreamer:
                 self._report(sent, total, free)
                 budget = min(free - self._margin, self._chunk)
                 if budget <= 0:
-                    # Buffer full: bounded wait then re-query.
+                    # Buffer full: overflow check, then bounded wait.
+                    self._check_overflow()
                     if zero_waited >= self._zero_max_wait:
                         raise StreamerFatal(
                             f"plotter buffer stayed full for {zero_waited:.0f}s; aborting"
                         )
+                    threading.Event().wait(self._zero_poll)
+                    zero_waited += self._zero_poll
+                    continue
+                end = split_chunk(text, sent, budget)
+                if end == -1:
+                    # The default chunk can't reach a boundary; retry with
+                    # the FULL safe window (free - margin) — a longer chunk
+                    # is fine when the buffer actually has room (phase-1
+                    # fallback semantics, boundary-only).
+                    end = split_chunk(text, sent, max(free - self._margin, budget))
+                if end == -1:
+                    # No instruction boundary fits ANY window. If the next
+                    # instruction can never fit even a drained buffer, fail
+                    # loudly (raw uploads with monster instructions — the
+                    # pipeline pre-splits to <=240B, raw ones now do too).
+                    nxt = text.find(";", sent)
+                    instr_len = (nxt + 1 if nxt != -1 else len(text)) - sent
+                    if instr_len > protocol.INPUT_BUFFER_BYTES - self._margin:
+                        raise StreamerFatal(
+                            f"single instruction of {instr_len}B exceeds the "
+                            f"{protocol.INPUT_BUFFER_BYTES - self._margin}B safe "
+                            f"window; split the file's long PD/PU commands"
+                        )
+                    if zero_waited >= self._zero_max_wait:
+                        raise StreamerFatal(
+                            f"plotter buffer stayed full for {zero_waited:.0f}s; aborting"
+                        )
+                    self._check_overflow()
                     threading.Event().wait(self._zero_poll)
                     zero_waited += self._zero_poll
                     continue
                 zero_waited = 0.0
-                end = split_chunk(text, sent, budget)
-                if end == -1:
-                    end = split_chunk(text, sent, max(1, free))
-                if end == -1:
-                    if zero_waited >= self._zero_max_wait:
-                        raise StreamerFatal(
-                            f"plotter buffer stayed full for {zero_waited:.0f}s; aborting"
-                        )
-                    threading.Event().wait(self._zero_poll)
-                    zero_waited += self._zero_poll
-                    continue
                 chunk = data[sent:end]
                 try:
                     self._transport.write(chunk)  # transport guarantees full write
@@ -140,6 +163,7 @@ class ChunkedStreamer:
                     raise StreamerFatal(f"write failed at byte {sent}: {exc}") from exc
                 sent = end
                 self._report(sent, total, free)
+            self._check_overflow()  # final: catch any mid-stream overflow
             return sent
         except StreamInterrupted as exc:
             if "cancelled" in str(exc) and sent < total:
@@ -151,6 +175,19 @@ class ChunkedStreamer:
                 except Exception:
                     pass
             raise
+
+    def _check_overflow(self) -> None:
+        """ESC .E watchdog: error 16 = input buffer overflow (Prog. Manual
+        §10-29). The phase-1 sender aborted on it; restoring that here —
+        a silent overflow mid-PD corrupts the plot (horizontal garbage
+        lines, 2026-08-19 incident). Best-effort: query failure alone
+        never kills the stream; a definitive 16 does."""
+        try:
+            code, meaning = self._transport.extended_error()
+        except Exception:
+            return
+        if code == 16:
+            raise StreamerFatal(f"plotter input buffer overflow (ESC.E 16): {meaning}")
 
     def _query_free(self) -> int:
         """ESC.B query with bounded retries. Returns free bytes 0..1024.

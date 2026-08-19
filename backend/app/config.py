@@ -28,7 +28,8 @@ class Settings(BaseSettings):
     write_timeout_s: float = 5.0
 
     # Buffer-safe streaming (docs/hardware-notes.md §6)
-    stream_safety_margin: int = 64
+    stream_safety_margin: int = 320  # >= chunk (256): safe even against a
+    # fully stale ESC.B reading taken before the last chunk write
     stream_default_chunk: int = 256
     stream_query_timeout_s: float = 2.0
     stream_max_retries: int = 3

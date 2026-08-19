@@ -115,14 +115,16 @@ def test_three_jobs_run_serially(stack, fake):
         assert done.status == JobState.COMPLETED, done.error
 
 
-def test_giant_single_instruction_plots(stack, fake):
-    """Regression (live 2026-08-18): vpype-optimized output contains single
-    PD polylines > the 1024B plotter buffer. The 7475A parses HP-GL
-    incrementally — such instructions MUST plot (mid-instruction chunking),
-    not abort. Mirrors the failed a4_impossible_geometry job: a 1542B PD
-    at offset 32617 previously raised StreamerFatal."""
+def test_giant_single_instruction_refused_loudly(stack, fake):
+    """Contract change (2026-08-19 zigzag-canary evidence): the real 7475A
+    misparses mid-instruction chunk splits — OE 2 "wrong number of
+    parameters", corrupted coordinates — despite byte-perfect delivery.
+    The old behavior (giant PD MUST plot via mid-split streaming) is what
+    rotted every phase-2 plot. Instructions that cannot fit the safe
+    window are now refused loudly. Pipeline outputs are pre-split to
+    <=240B and raw HP-GL uploads are pre-split at the API, so this refusal
+    only fires on raw store bypasses like this one."""
     settings, jobs, worker = stack
-    # one ~5.6KB PD instruction (vpype linemerge-style giant polyline)
     giant = "PD" + ",".join(
         f"{100 + (i % 9000)},{100 + ((i * 7) % 7000)}" for i in range(400)
     ) + ";"
@@ -134,9 +136,9 @@ def test_giant_single_instruction_plots(stack, fake):
     worker.submit("start", job.id)
     done = _wait(jobs, job.id, {JobState.COMPLETED, JobState.FAILED,
                                 JobState.DISCONNECTED}, timeout=120)
-    assert done.status == JobState.COMPLETED, done.error
-    assert done.bytes_sent == len(payload.encode())
+    assert done.status == JobState.FAILED
+    assert "exceeds" in (done.error or ""), done.error
     assert fake.rs232_error == 0
-    # the plotter executed the full polyline: one PD token in its log
+    # nothing may have been drawn from the refused payload's giant token
     pds = [c for c in fake.commands if c.startswith("PD")]
-    assert len(pds) == 1 and len(pds[0]) == len(giant)
+    assert all(len(c) < len(giant) for c in pds)

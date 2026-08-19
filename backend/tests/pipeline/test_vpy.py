@@ -120,3 +120,45 @@ def test_build_hpgl_velocity():
 
     text = build_hpgl({1: lines}, "a4", {"1": 1}, Opts())
     assert "VS5;" in text
+
+
+def test_velocity_alias_from_ui_key(tmp_path):
+    """2026-08-19: the UI slider sends `velocity`; the pipeline read only
+    `velocity_cm_s` — user velocity was silently ignored (no VS emitted,
+    plot ran at 38.1 default). Both keys must work."""
+    from app.services.pipeline.vpy import PipelineOptions, run_pipeline
+
+    for key in ("velocity", "velocity_cm_s"):
+        opts = PipelineOptions.from_dict({key: 10})
+        assert opts.velocity_cm_s == 10.0, f"alias {key} ignored"
+    svg = tmp_path / "v.svg"
+    svg.write_text(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="60">'
+        '<rect x="5" y="5" width="40" height="30" fill="none" stroke="#000"/>'
+        '</svg>'
+    )
+    res = run_pipeline(str(svg), "a4", {"velocity": 10})
+    assert "VS9.88;" in res.hpgl, "velocity alias did not emit VS"
+    assert res.stats["estimate"]["velocity_cm_s"] == 9.88
+
+
+def test_long_pd_commands_are_split(tmp_path):
+    """2026-08-19: >600-char PD instructions exceed comfortable streamer
+    windows; every emitted instruction must be <= 240 chars (PD
+    continuation chunks are geometry-identical)."""
+    import re as _re
+    from app.services.pipeline.vpy import run_pipeline
+
+    pts = " ".join(f'<circle cx="{20 + i * 3}" cy="50" r="15"/>' for i in range(12))
+    svg = tmp_path / "many.svg"
+    svg.write_text(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100">'
+        f"{pts}</svg>"
+    )
+    res = run_pipeline(str(svg), "a4", {})
+    cmds = [c for c in res.hpgl.split(";") if c]
+    longest = max(len(c) + 1 for c in cmds)
+    assert longest <= 240, f"unsplit instruction of {longest} chars"
+    # geometry identity: concatenated pair lists survive
+    total_pairs = len(_re.findall(r"[-0-9]+,[-0-9]+", res.hpgl))
+    assert total_pairs > 100

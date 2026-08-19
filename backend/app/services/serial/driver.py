@@ -231,6 +231,16 @@ class HP7475ADevice:
 
     # -- completion (hardware-notes §5) ----------------------------------------
 
+    def abort_and_park(self) -> None:
+        """Immediate abort (ESC.K discards buffered graphics) + pen up.
+
+        Escape sequences are processed at the RS-232 control level, ahead
+        of any buffered HP-GL, so this halts pending motion at once. Used
+        on cancellation (2026-08-19: a cancelled plot's buffer kept
+        executing, drawing on the sheet after the user stopped it)."""
+        self._transport.write(b"\x1b.K")
+        self._transport.write(b"PU;")
+
     def complete_plot(self, timeout: float, on_status=None,
                       poll_interval: float = 1.0) -> tuple[float, float, bool]:
         """Queue an OA; sentinel AFTER the streamed job payload and block
