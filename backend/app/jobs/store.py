@@ -92,9 +92,11 @@ class JobStore:
 
     def update(self, job_id: str, **fields) -> Job:
         """Update whitelisted fields (name/paper/pen_map/options/hpgl/
-        bytes_total/bytes_sent/stats/file_id)."""
+        bytes_total/bytes_sent/stats/file_id/error — error so a failed
+        prepare can record WHY while the job stays re-preparable QUEUED,
+        goal 47da763c phase-3 wart fix)."""
         allowed = {"name", "paper", "pen_map", "options", "hpgl", "bytes_total",
-                   "bytes_sent", "stats", "file_id"}
+                   "bytes_sent", "stats", "file_id", "error"}
         unknown = set(fields) - allowed
         if unknown:
             raise ValueError(f"cannot update fields: {sorted(unknown)}")
@@ -105,11 +107,11 @@ class JobStore:
             job.updated_at = now()
             self._db.execute(
                 "UPDATE jobs SET name=?, paper=?, pen_map=?, options=?, hpgl=?,"
-                " bytes_total=?, bytes_sent=?, stats=?, file_id=?, updated_at=? WHERE id=?",
+                " bytes_total=?, bytes_sent=?, stats=?, file_id=?, error=?, updated_at=? WHERE id=?",
                 (
                     job.name, job.paper, _dumps(job.pen_map), _dumps(job.options), job.hpgl,
                     job.bytes_total, job.bytes_sent, _dumps(job.stats), job.file_id,
-                    job.updated_at, job.id,
+                    job.error, job.updated_at, job.id,
                 ),
             )
         self._emit(job)

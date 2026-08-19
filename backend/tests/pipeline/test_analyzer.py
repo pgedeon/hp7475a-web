@@ -63,7 +63,6 @@ def test_unsupported_text_and_image_reported():
     assert "gradient" in joined
     assert "marker" in joined
     assert "clip-path" in joined
-    assert "fill" in joined
 
 
 def test_no_viewbox_bbox_from_declared_size():
@@ -103,3 +102,18 @@ def test_exact_a4_design_fits_a4():
     fit = analyze_svg(svg).est_paper_fit
     assert fit["a4"] is True
     assert fit["a3"] is True
+
+
+def test_fills_are_warnings_not_blockers():
+    """Filled shapes still plot (vpype extracts outlines) — they must not
+    dead-end the UI as 'unsupported content' (2026-08-19 user report)."""
+    data = (
+        b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">'
+        b'<path d="M10 10 L90 10 L90 90 L10 90 Z" fill="#0000ff"/></svg>'
+    )
+    clean, _ = sanitize_svg(data)
+    a = analyze_svg(clean)
+    assert a.unsupported == []
+    assert len(a.warnings) == 1
+    assert "filled shapes" in a.warnings[0]
+    assert a.layers == []  # fill-only: pen map falls back to single layer "1"

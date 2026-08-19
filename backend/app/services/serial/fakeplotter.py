@@ -397,6 +397,11 @@ class FakeHP7475A:
                 self.commands.append(token)
             mnem = token[:2].upper()
             params = token[2:].rstrip(";").strip()
+            if not token.endswith(";"):
+                # Partial-pop mover tokens legitimately carry a trailing
+                # comma (the next pair has not arrived yet); the real
+                # plotter never sees them terminated that way.
+                params = params.rstrip(",")
             reply: str | None = None
             is_motion = mnem in _MOVERS
             if mnem == "OI":

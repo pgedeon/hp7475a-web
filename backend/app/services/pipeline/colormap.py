@@ -28,12 +28,32 @@ _SVG_NS = "http://www.w3.org/2000/svg"
 _INKSCAPE_NS = "http://www.inkscape.org/namespaces/inkscape"
 
 
+def _style_stroke(el: ET.Element) -> str | None:
+    """``stroke`` value from a CSS ``style="..."`` attribute, if any.
+
+    Needed for Inkscape plain-SVG output (goal 47da763c phase 3 F6), which
+    serializes glyph strokes as ``style="stroke:#0000ff;..."`` rather than
+    presentation attributes — without this the converted paths look
+    strokeless to color grouping."""
+    style = el.get("style")
+    if not style:
+        return None
+    for decl in style.split(";"):
+        prop, sep, value = decl.partition(":")
+        if sep and prop.strip().lower() == "stroke":
+            return value
+    return None
+
+
 def effective_stroke(stack: list[ET.Element]) -> str | None:
-    """Effective stroke for the deepest element of *stack*: own attribute,
-    else nearest ancestor's, else None. Normalized like analyzer
-    (strip+lower); ``none`` counts as no stroke."""
+    """Effective stroke for the deepest element of *stack*: own attribute
+    (or CSS style attribute — Inkscape plain SVG), else nearest ancestor's,
+    else None. Normalized like analyzer (strip+lower); ``none`` counts as
+    no stroke."""
     for el in reversed(stack):
         stroke = el.get("stroke")
+        if stroke is None:
+            stroke = _style_stroke(el)
         if stroke is None:
             continue
         value = stroke.strip().lower()

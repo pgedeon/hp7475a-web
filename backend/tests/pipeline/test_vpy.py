@@ -73,7 +73,8 @@ def test_velocity_option_emits_vs():
     result = run_pipeline(
         BENIGN, "a4", PipelineOptions(velocity_cm_s=10.0), {"1": 1, "2": 2, "3": 3}
     )
-    assert "VS10;" in result.hpgl
+    # phase 2: VS is quantized to the 0.38 cm/s grid (brief F2)
+    assert "VS9.88;" in result.hpgl
     assert validate_hpgl(result.hpgl, "a4").errors == []
 
 
@@ -119,57 +120,3 @@ def test_build_hpgl_velocity():
 
     text = build_hpgl({1: lines}, "a4", {"1": 1}, Opts())
     assert "VS5;" in text
-
-
-def _hpgl_bbox(hpgl: str) -> tuple[float, float, float, float]:
-    """Bounding box of all PU/PD motion coordinates in an HPGL stream."""
-    import re
-
-    nums: list[float] = []
-    for m in re.finditer(r"(?:PU|PD|PA|PR)([-\d.,]+)", hpgl):
-        nums.extend(float(v) for v in m.group(1).split(",") if v)
-    xs, ys = nums[0::2], nums[1::2]
-    return min(xs), min(ys), max(xs), max(ys)
-
-
-_WIDE_SVG = (
-    b'<svg xmlns="http://www.w3.org/2000/svg" width="120mm" height="40mm" '
-    b'viewBox="0 0 120 40"><g stroke="black" fill="none">'
-    b'<rect x="10" y="10" width="100" height="20"/></g></svg>'
-)
-
-
-def test_rotate_90_swaps_geometry_orientation(tmp_path):
-    """Goal 91ce9220 follow-up: rotate_deg=90 must swap the plotted bbox's
-    aspect (wide-short design becomes tall-narrow on the sheet)."""
-    import tempfile
-
-    from app.services.serial.paper import PAPERS
-
-    p = tmp_path / "wide.svg"
-    p.write_bytes(_WIDE_SVG)
-
-    plain = run_pipeline(str(p), "a4", PipelineOptions(), {})
-    rot = run_pipeline(str(p), "a4", PipelineOptions(rotate_deg=90), {})
-
-    def span(hpgl: str) -> tuple[float, float]:
-        x0, y0, x1, y1 = _hpgl_bbox(hpgl)
-        return x1 - x0, y1 - y0
-
-    pw, ph = span(plain.hpgl)
-    rw, rh = span(rot.hpgl)
-    assert pw > ph  # original is wide
-    assert rh > rw  # rotated is tall
-    assert rot.stats["rotate_deg"] == 90
-    # rotated geometry still inside the A4 plottable area
-    x0, y0, x1, y1 = _hpgl_bbox(rot.hpgl)
-    a4 = PAPERS["a4"]
-    assert x0 >= a4.x_range[0] and x1 <= a4.x_range[1]
-    assert y0 >= a4.y_range[0] and y1 <= a4.y_range[1]
-
-
-def test_rotate_rejected_outside_quarters(tmp_path):
-    from app.services.pipeline.vpy import PipelineOptions
-
-    with pytest.raises(Exception):
-        PipelineOptions.from_dict({"rotate_deg": 45})

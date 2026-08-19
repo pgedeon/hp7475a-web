@@ -26,6 +26,8 @@ class FileMeta:
     sanitize_report: dict | None = None
     analysis: dict | None = None
     validation: dict | None = None
+    text_converted: bool = False
+    conversion: dict | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return self.__dict__.copy()
@@ -76,6 +78,8 @@ class FileRegistry:
             size_bytes=raw["size_bytes"], stored_path=raw["stored_path"],
             created_at=raw["created_at"], sanitize_report=raw.get("sanitize_report"),
             analysis=raw.get("analysis"), validation=raw.get("validation"),
+            text_converted=bool(raw.get("text_converted", False)),
+            conversion=raw.get("conversion"),
         )
 
     def update(self, meta: FileMeta) -> None:

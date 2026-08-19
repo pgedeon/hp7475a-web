@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import { api, apiErrorMessage, ApiError } from "../api/client";
-import type { Analysis, Job, PenMapMode, UploadSvgResult } from "../api/types";
+import type { Analysis, Job, UploadSvgResult } from "../api/types";
 import { PAPER_NAMES, isJobEvent } from "../api/types";
 import { useApp } from "../state/app";
 import PenMap, { normalizeLayers } from "../components/PenMap";
 import PagePreview from "../components/PagePreview";
+import ArtworkPreview from "../components/ArtworkPreview";
 import StatusBadge from "../components/StatusBadge";
 import Progress from "../components/Progress";
 import Modal from "../components/Modal";
@@ -12,37 +13,13 @@ import Modal from "../components/Modal";
 interface OptState { linemerge: boolean; linesimplify: boolean; sort: boolean; reloop: boolean }
 const DEFAULT_OPTS: OptState = { linemerge: true, linesimplify: true, sort: true, reloop: true };
 
+interface CopiesState { rows: number; cols: number; spacing_mm: number }
+const DEFAULT_COPIES: CopiesState = { rows: 1, cols: 1, spacing_mm: 5 };
+
 const ACTIVE_STATES = new Set(["QUEUED", "PREPARING", "READY", "SENDING", "PLOTTING", "COMPLETING", "PAUSED"]);
-/** States in which the hardware is moving — never auto re-prepare then. */
-const PLOTTING_STATES = new Set(["SENDING", "PLOTTING", "PAUSED", "COMPLETING"]);
 
-/** Paper areas in mm² for "is the picked sheet larger than the plotter's?"
- *  Fallback when the /api/papers table hasn't loaded yet. */
-const PAPER_AREA_MM2: Record<string, number> = {
-  a4: 297 * 210, a3: 420 * 297, a: 279.4 * 215.9, b: 431.8 * 279.4,
-};
-
-/** Per-file mapping selections: active mode + separate maps keyed for each
- *  mode (layer names vs color hexes) so toggling never loses selections. */
-interface FileMapState {
-  mode: PenMapMode;
-  maps: Record<PenMapMode, Record<string, number>>;
-}
-
-/** Auto-assign pens 1–6 to the first six entries, cycling on overflow. */
-function seedMap(names: string[]): Record<string, number> {
-  const m: Record<string, number> = {};
-  names.slice(0, 6).forEach((n, i) => { m[n] = (i % 6) + 1; });
-  return m;
-}
-
-/** VS velocity in cm/s — HP 7475A range 1–38 (manual, 0.38 steps). */
-const VELOCITIES: { label: string; value: number | null }[] = [
-  { label: "Default (plotter setting)", value: null },
-  { label: "Slow · 10 cm/s", value: 10 },
-  { label: "Medium · 20 cm/s", value: 20 },
-  { label: "Fast · 38 cm/s", value: 38 },
-];
+/** VS velocity bounds (cm/s) — HP 7475A, 0.38 steps (brief F2). */
+const VEL_MIN = 10, VEL_MAX = 38.1, VEL_STEP = 0.38;
 
 /** Generic renderer for the sanitizer report dict (shape pinned loosely). */
 function SanitizeReportView({ report }: { report: Record<string, unknown> }) {
@@ -65,18 +42,22 @@ function SanitizeReportView({ report }: { report: Record<string, unknown> }) {
 }
 
 export default function PlotPage() {
-  const { papers, papersError, retryPapers, toast, ws, device } = useApp();
+  const { papers, papersError, retryPapers, toast, ws } = useApp();
 
   const [file, setFile] = useState<UploadSvgResult | null>(null);
   const [analysis, setAnalysis] = useState<Analysis | null>(null);
   const [analysisError, setAnalysisError] = useState<string | null>(null);
-  const [mapState, setMapState] = useState<Record<string, FileMapState>>({});
+  const [penMap, setPenMap] = useState<Record<string, number>>({});
   const [paper, setPaper] = useState<string>("a4");
-  const [scale, setScale] = useState(100);
-  const [plotterPaper, setPlotterPaper] = useState<string | null>(null);
   const [opts, setOpts] = useState<OptState>(DEFAULT_OPTS);
-  const [velSelect, setVelSelect] = useState<string>("");
-  const [customVel, setCustomVel] = useState(20);
+  const [rotate, setRotate] = useState(false);
+  const [margin, setMargin] = useState(10);
+  const [velocity, setVelocity] = useState(VEL_MAX);
+  const [copies, setCopies] = useState<CopiesState>(DEFAULT_COPIES);
+  const [showTravel, setShowTravel] = useState(false);
+  const [convertText, setConvertText] = useState(false);
+  const [artworkSvg, setArtworkSvg] = useState<string | null>(null);
+  const [penDown, setPenDown] = useState<boolean | null>(null);
   const [uploading, setUploading] = useState(false);
   const [preparing, setPreparing] = useState(false);
   const [job, setJob] = useState<Job | null>(null);
@@ -87,62 +68,54 @@ export default function PlotPage() {
   const [dragOver, setDragOver] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
-  /** Latest job for the debounced re-prepare effect (kept out of deps so a
-   *  status change alone never re-triggers it). */
-  const jobRef = useRef<Job | null>(null);
-  jobRef.current = job;
-  /** Skip the very first run of the re-prepare effect (initial state, not a
-   *  user change). */
-  const reprepareStarted = useRef(false);
-  /** Once the user picks a paper, hard-clip detection stops overriding it. */
-  const paperTouched = useRef(false);
 
-  const layers = useMemo(() => normalizeLayers(analysis?.layers), [analysis]);
-  const strokeColors = useMemo(() => analysis?.stroke_colors ?? [], [analysis]);
-  // Wanted mode (per file) vs effective mode — files without stroke_colors
-  // can't use color mapping, so fall back to layers defensively.
-  const wantedMode: PenMapMode = (file && mapState[file.id]?.mode) ?? "layers";
-  const mode: PenMapMode = wantedMode === "colors" && strokeColors.length === 0 ? "layers" : wantedMode;
-  const colorModeUnavailable = wantedMode === "colors" && mode === "layers";
-  const penMap = (file && mapState[file.id]?.maps[mode]) ?? {};
-  const mappingRows = mode === "colors"
-    ? strokeColors.map((c) => ({ name: c, color: c }))
-    : layers;
+  const layers = useMemo(() => {
+    const ls = normalizeLayers(analysis?.layers);
+    if (ls.length > 0) return ls;
+    return (analysis?.stroke_colors ?? []).map((c, i) => ({ name: c, color: c, index: i } as { name: string; color?: string; index?: number }));
+  }, [analysis]);
 
-  const updateMap = (next: Record<string, number>) => {
-    if (!file) return;
-    setMapState((s) => {
-      const cur = s[file.id] ?? { mode, maps: { layers: {}, colors: {} } };
-      return { ...s, [file.id]: { ...cur, maps: { ...cur.maps, [mode]: next } } };
-    });
-  };
+  // Artwork w/h (mm) from analysis bbox — drives the orientation label
+  // and the "fits only when rotated" tip (goal 47da763c).
+  const artworkDims = useMemo((): [number, number] | null => {
+    const b = analysis?.bbox_mm;
+    if (!b) return null;
+    const n = Array.isArray(b) ? b : [b.min_x, b.min_y, b.max_x, b.max_y];
+    const v = n.map(Number);
+    if (v.some((x) => !Number.isFinite(x))) return null;
+    return [Math.abs(v[2] - v[0]), Math.abs(v[3] - v[1])];
+  }, [analysis]);
 
-  const setMappingMode = (m: PenMapMode) => {
-    if (!file) return;
-    setMapState((s) => {
-      const cur = s[file.id] ?? { mode: m, maps: { layers: {}, colors: {} } };
-      return { ...s, [file.id]: { ...cur, mode: m } };
-    });
-  };
+  const rotationHint = useMemo(() => {
+    const p = papers[paper];
+    if (!artworkDims || !p) return null;
+    const [w, h] = artworkDims;
+    const fitsNormal = w <= p.size_mm[0] && h <= p.size_mm[1];
+    const fitsRotated = analysis?.fit_rotate90?.[paper] ?? (w <= p.size_mm[1] && h <= p.size_mm[0]);
+    if (!fitsNormal && fitsRotated) {
+      return `Tip: fits ${paper.toUpperCase()} only when rotated — enable Rotate 90°.`;
+    }
+    return null;
+  }, [artworkDims, analysis, paper, papers]);
 
   // ---- upload ------------------------------------------------------------
   const upload = useCallback(async (f: File) => {
     setUploading(true);
+    setArtworkSvg(null);
     try {
-      const meta = await api.uploadSvg(f);
+      const meta = await api.uploadSvg(f, convertText);
       setFile(meta); setAnalysis(null); setAnalysisError(null);
       setJob(null); setPreviewSvg(null); setPreviewError(null); setConfirmed(false);
+      // F5: instant artwork preview from the STORED (sanitized) file.
+      api.fileRaw(meta.id).then(setArtworkSvg).catch(() => setArtworkSvg(null));
       try {
         const a = await api.analysis(meta.id);
         setAnalysis(a);
-        // Default: layer mapping only when Inkscape layers exist AND >1;
-        // otherwise colors are the natural grouping (goal 3e598c6e).
         const ls = normalizeLayers(a.layers);
-        const m: PenMapMode = ls.length > 1 ? "layers" : "colors";
-        setMapState((s) => ({ ...s, [meta.id]: { mode: m, maps: {
-          layers: seedMap(ls.map((l) => l.name)),
-          colors: seedMap(a.stroke_colors ?? []),
-        } } }));
+        const names = ls.length ? ls.map((l) => l.name) : (a.stroke_colors ?? []);
+        const map: Record<string, number> = {};
+        names.slice(0, 6).forEach((n, i) => { map[n] = (i % 6) + 1; });
+        setPenMap(map);
       } catch (e) {
         setAnalysisError(apiErrorMessage(e));
       }
@@ -151,7 +124,7 @@ export default function PlotPage() {
     } finally {
       setUploading(false);
     }
-  }, [toast]);
+  }, [toast, convertText]);
 
   const onDrop = (e: DragEvent) => {
     e.preventDefault(); setDragOver(false);
@@ -165,12 +138,12 @@ export default function PlotPage() {
     setPreparing(true);
     try {
       const options: Record<string, unknown> = { ...opts };
-      const vel = velSelect === "" || velSelect === "custom" ? null : Number(velSelect);
-      if (vel != null) options.velocity = vel;
+      options.rotate_90 = rotate;
+      options.margin_mm = margin;
+      options.velocity_cm_s = velocity;
+      if (copies.rows > 1 || copies.cols > 1) options.copies = copies;
       const j = await api.createJob({
-        file_id: file.id, name: file.name, paper,
-        scale: scale / 100,
-        pen_map: penMap, pen_map_mode: mode, options,
+        file_id: file.id, name: file.name, paper, pen_map: penMap, options,
       });
       setJob(j); setPreviewSvg(null); setPreviewError(null);
       await api.prepareJob(j.id);
@@ -181,35 +154,6 @@ export default function PlotPage() {
       setPreparing(false);
     }
   };
-
-  // Detect the plotter's DIP-switched paper (hard-clip query) on mount and
-  // whenever connection state changes; adopt it as the default selection
-  // until the user picks one themselves.
-  const connected = device?.connected;
-  useEffect(() => {
-    let alive = true;
-    (async () => {
-      try {
-        const hc = await api.hardClip();
-        if (!alive) return;
-        setPlotterPaper(hc.paper);
-        if (hc.paper && !paperTouched.current) setPaper(hc.paper);
-      } catch {
-        if (alive) setPlotterPaper(null); // disconnected / backend offline
-      }
-    })();
-    return () => { alive = false; };
-  }, [connected]);
-
-  // Paper/scale changes re-prepare (debounced) so the preview reflects the
-  // new selection. Only after a first prepare exists, and never while the
-  // hardware is moving. Pen map + options state is untouched by prepare.
-  useEffect(() => {
-    if (!reprepareStarted.current) { reprepareStarted.current = true; return; }
-    if (!jobRef.current || PLOTTING_STATES.has(jobRef.current.status)) return;
-    const t = setTimeout(() => void prepare(), 400);
-    return () => clearTimeout(t);
-  }, [paper, scale]);
 
   // Poll job while active; fetch preview once not-QUEUED/PREPARING.
   useEffect(() => {
@@ -224,24 +168,44 @@ export default function PlotPage() {
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, [job]);
 
-  // WS job events patch the local job directly.
+  // WS job events patch the local job directly. Returns the SAME reference
+  // when the patch is a no-op so the effect converges instead of looping
+  // (job is a dep; a fresh object every run would re-trigger forever).
   useEffect(() => {
     const m = ws.last;
     if (!m || !isJobEvent(m) || !job || m.job_id !== job.id) return;
-    // Return the SAME ref when nothing changed — otherwise this effect
-    // re-fires on its own setJob and loops forever.
+    if (m.event === "progress") {
+      if (typeof m.pen_down === "boolean") setPenDown(m.pen_down);
+      setJob((prev) => (prev && (m.acked_bytes ?? prev.bytes_sent) !== prev.bytes_sent
+        ? {
+            ...prev,
+            bytes_sent: m.acked_bytes ?? prev.bytes_sent,
+            bytes_total: m.total_bytes ?? prev.bytes_total,
+          }
+        : prev));
+      return;
+    }
+    if (m.event === "resume") {
+      setJob((prev) => (prev
+        ? {
+            ...prev,
+            bytes_sent: m.acked_bytes ?? prev.bytes_sent,
+            bytes_total: m.total_bytes ?? prev.bytes_total,
+          }
+        : prev));
+      return;
+    }
     setJob((prev) => {
-      if (!prev || prev.id !== m.job_id) return prev;
+      if (!prev) return prev;
       const next = {
-        ...prev,
         status: m.status,
         bytes_sent: m.bytes_sent ?? prev.bytes_sent,
         bytes_total: m.bytes_total ?? prev.bytes_total,
         error: m.error ?? prev.error,
       };
-      return next.status === prev.status && next.bytes_sent === prev.bytes_sent
-        && next.bytes_total === prev.bytes_total && next.error === prev.error
-        ? prev : next;
+      if (next.status === prev.status && next.bytes_sent === prev.bytes_sent
+        && next.bytes_total === prev.bytes_total && next.error === prev.error) return prev;
+      return { ...prev, ...next };
     });
   }, [ws.last, job]);
 
@@ -277,11 +241,6 @@ export default function PlotPage() {
   const canResume = job && job.status === "PAUSED";
   const canCancel = job && ACTIVE_STATES.has(job.status);
   const pensUsed = [...new Set(Object.values(penMap))].sort();
-  const paperArea = (name: string): number =>
-    papers[name] ? papers[name].size_mm[0] * papers[name].size_mm[1]
-      : (PAPER_AREA_MM2[name] ?? 0);
-  const paperMismatch = plotterPaper != null && connected === true
-    && paperArea(paper) > paperArea(plotterPaper) && paperArea(plotterPaper) > 0;
 
   return (
     <div className="page plot-page">
@@ -302,10 +261,26 @@ export default function PlotPage() {
           <input ref={fileInput} type="file" accept=".svg,image/svg+xml" aria-label="SVG file"
             onChange={(e) => { const f = e.target.files?.[0]; if (f) void upload(f); }} />
         </div>
+        <label className="convert-text-check">
+          <input type="checkbox" checked={convertText} data-testid="convert-text"
+            onChange={(e) => setConvertText(e.target.checked)} />
+          Convert text to paths (Inkscape)
+          <span className="muted small"> — applies to the next upload; server-side, re-sanitized</span>
+        </label>
         {file && (
           <div className="file-meta">
             <p><b>{file.name}</b> · {(file.size / 1024).toFixed(1)} KB · id {file.id}</p>
             <SanitizeReportView report={file.sanitize as Record<string, unknown>} />
+            {file.text_converted && (
+              <p className="ok small" data-testid="converted-note">
+                Text converted to paths (Inkscape) — geometry is stored stroke-only.
+              </p>
+            )}
+            {file.conversion?.warning && (
+              <div className="banner warn" data-testid="conversion-warning" role="status">
+                {file.conversion.warning} — original file kept.
+              </div>
+            )}
             {analysisError && <div className="banner err">Analysis failed: {analysisError} <button onClick={() => file && void api.analysis(file.id).then(setAnalysis).catch((e) => setAnalysisError(apiErrorMessage(e)))}>Retry</button></div>}
             {analysis && (
               <div className="analysis" data-testid="analysis">
@@ -317,8 +292,35 @@ export default function PlotPage() {
                 </ul>
                 {analysis.unsupported && analysis.unsupported.length > 0 && (
                   <div className="banner warn" role="alert">
-                    Unsupported content: {analysis.unsupported.join(", ")}.
-                    These cannot be plotted as vector lines — convert text to paths, remove rasters/filters.
+                    <p>Unsupported content: {analysis.unsupported.join(", ")}.
+                    These cannot be plotted as vector lines — convert text to paths, remove rasters/filters.</p>
+                    <ul className="hint-list" data-testid="unsupported-hints">
+                      {analysis.unsupported
+                        .filter((w) => analysis.hints?.[w])
+                        .map((w) => (
+                          <li key={w}>
+                            <b>{w}</b> — {analysis.hints?.[w]}
+                            {w.includes("text elements") && !convertText && (
+                              <button type="button" className="link-btn" data-testid="hint-convert-btn"
+                                onClick={() => setConvertText(true)}>
+                                Enable text conversion
+                              </button>
+                            )}
+                          </li>
+                        ))}
+                    </ul>
+                  </div>
+                )}
+                {analysis.warnings && analysis.warnings.length > 0 && (
+                  <div className="banner info" role="status">
+                    <p>Warnings (non-blocking): {analysis.warnings.join(", ")}.</p>
+                    <ul className="hint-list" data-testid="warnings-hints">
+                      {analysis.warnings
+                        .filter((w) => analysis.hints?.[w])
+                        .map((w) => (
+                          <li key={w}><b>{w}</b> — {analysis.hints?.[w]}</li>
+                        ))}
+                    </ul>
                   </div>
                 )}
                 {analysis.est_paper_fit && (
@@ -347,19 +349,8 @@ export default function PlotPage() {
         <h2>2 · Configure</h2>
         {!file && <p className="muted" data-testid="configure-empty">Upload a file to configure pens, optimization and paper.</p>}
         {file && (<>
-          <h3>Pen mapping ({mode === "colors" ? "stroke color → pen 1–6" : "layer → pen 1–6"})</h3>
-          <div className="mode-toggle" role="group" aria-label="pen mapping mode" data-testid="pen-mode">
-            <button aria-pressed={mode === "layers"} data-testid="mode-layers"
-              onClick={() => setMappingMode("layers")}>By Layer</button>
-            <button aria-pressed={mode === "colors"} data-testid="mode-colors"
-              onClick={() => setMappingMode("colors")}>By Color</button>
-          </div>
-          {colorModeUnavailable && (
-            <p className="muted small" role="note" data-testid="color-mode-unavailable">
-              Analysis reported no stroke colors for this file — layer mapping shown.
-            </p>
-          )}
-          <PenMap mode={mode} layers={mappingRows} penMap={penMap} onChange={updateMap} />
+          <h3>Pen mapping (layer → pen 1–6)</h3>
+          <PenMap layers={layers} penMap={penMap} onChange={setPenMap} />
 
           <h3>Optimization</h3>
           <div className="opt-grid" role="group" aria-label="optimization options">
@@ -373,39 +364,71 @@ export default function PlotPage() {
           </div>
 
           <h3>Pen velocity (VS)</h3>
-          <select aria-label="pen velocity" value={velSelect}
-            onChange={(e) => setVelSelect(e.target.value)}>
-            {VELOCITIES.map((v) => (
-              <option key={v.label} value={v.value ?? ""}>{v.label}</option>
-            ))}
-            <option value="custom">Custom…</option>
-          </select>
-          {velSelect === "custom" && (
-            <div className="custom-vel">
-              <label>
-                Custom velocity (cm/s, 1–38):
-                <input type="number" min={1} max={38} step={0.38} value={customVel}
-                  aria-label="custom velocity"
-                  onChange={(e) => {
-                    const v = Math.min(38, Math.max(1, Number(e.target.value) || 1));
-                    setCustomVel(v);
-                  }} />
-              </label>
-              <button className="ghost" onClick={() => setVelSelect(String(customVel))}>Apply</button>
-            </div>
+          <div className="vel-slider">
+            <input type="range" min={VEL_MIN} max={VEL_MAX} step={VEL_STEP}
+              value={velocity} data-testid="vel-slider" aria-label="pen velocity cm/s"
+              onChange={(e) => setVelocity(Number(e.target.value))} />
+            <span className={velocity >= VEL_MAX ? "muted" : ""} data-testid="vel-value">
+              {velocity.toFixed(2)} cm/s{velocity >= VEL_MAX ? " (default)" : ""}
+            </span>
+          </div>
+
+          <h3>Copies (tile on page)</h3>
+          <div className="copies-grid" role="group" aria-label="copies tiling">
+            <label>Rows
+              <input type="number" min={1} max={20} step={1} value={copies.rows}
+                aria-label="copies rows" data-testid="copies-rows"
+                onChange={(e) => setCopies({ ...copies, rows: clampInt(e.target.value, 1, 20, 1) })} />
+            </label>
+            <label>Cols
+              <input type="number" min={1} max={20} step={1} value={copies.cols}
+                aria-label="copies cols" data-testid="copies-cols"
+                onChange={(e) => setCopies({ ...copies, cols: clampInt(e.target.value, 1, 20, 1) })} />
+            </label>
+            <label>Spacing (mm)
+              <input type="number" min={0} max={100} step={1} value={copies.spacing_mm}
+                aria-label="copies spacing mm" data-testid="copies-spacing"
+                onChange={(e) => setCopies({ ...copies, spacing_mm: clampInt(e.target.value, 0, 100, 0) })} />
+            </label>
+            {(copies.rows > 1 || copies.cols > 1) && (
+              <span className="muted small">
+                {copies.rows}×{copies.cols} = {copies.rows * copies.cols} copies
+              </span>
+            )}
+          </div>
+
+          <h3>Orientation &amp; margin</h3>
+          <div className="opt-grid" role="group" aria-label="orientation and margin">
+            <label>
+              <input type="checkbox" checked={rotate} data-testid="opt-rotate90"
+                onChange={(e) => setRotate(e.target.checked)} />
+              Rotate 90°
+            </label>
+            {artworkDims && (
+              <span className="muted small" data-testid="orientation-label">
+                artwork {rotate ? "landscape → portrait" : artworkDims[0] >= artworkDims[1] ? "landscape" : "portrait"}
+              </span>
+            )}
+            <label>
+              Margin (mm)
+              <input type="number" min={5} max={25} step={0.5} value={margin}
+                aria-label="margin mm" data-testid="margin-input"
+                onChange={(e) => {
+                  const v = Math.min(25, Math.max(5, Number(e.target.value) || 10));
+                  setMargin(v);
+                }} />
+            </label>
+          </div>
+          {rotationHint && (
+            <p className="banner warn" role="status" data-testid="rotation-hint">{rotationHint}</p>
           )}
 
           <h3>Paper</h3>
-          {plotterPaper && connected === true && (
-            <p className="muted small" data-testid="plotter-paper-hint">
-              Plotter: {plotterPaper.toUpperCase()} (hard-clip detected)
-            </p>
-          )}
           <div className="paper-select" role="radiogroup" aria-label="paper size">
             {PAPER_NAMES.map((p) => (
               <label key={p} className={p === paper ? "selected" : ""}>
                 <input type="radio" name="paper" value={p} checked={p === paper}
-                  onChange={() => { paperTouched.current = true; setPaper(p); }} />
+                  onChange={() => setPaper(p)} />
                 {p.toUpperCase()}
                 {papers[p] && <span className="muted small"> · {papers[p].size_mm[0].toFixed(0)}×{papers[p].size_mm[1].toFixed(0)} mm</span>}
               </label>
@@ -416,20 +439,6 @@ export default function PlotPage() {
               ⚠ DIP-mode hint: {papers[paper].dip_mode} — {papers[paper].info}
             </p>
           )}
-          {paperMismatch && (
-            <div className="banner warn" role="alert" data-testid="paper-mismatch-warning">
-              Plotter is configured for {plotterPaper!.toUpperCase()} — plotting {paper.toUpperCase()} will be rejected/clamped.
-            </div>
-          )}
-
-          <h3>Scale</h3>
-          <div className="scale-row">
-            <input type="range" min={25} max={100} step={5} value={scale}
-              aria-label="plot scale" data-testid="scale-slider"
-              onChange={(e) => setScale(Number(e.target.value))} />
-            <span className="scale-readout" data-testid="scale-readout">{scale}%</span>
-          </div>
-          <p className="muted small">Fraction of best-fit size. 100% fits the drawing to the selected paper.</p>
 
           <div className="row-actions">
             <button className="primary" disabled={!file || preparing || pensUsed.length === 0}
@@ -446,16 +455,44 @@ export default function PlotPage() {
 
       <section className="panel preview-panel">
         <h2>3 · Preview & plot</h2>
-        <PagePreview svg={previewSvg} error={previewError}
-          paper={papers[paper] ?? null} paperName={paper} scalePct={scale} />
+        {/* F5: artwork preview until the annotated placement preview (or its
+            error) exists — the swap happens exactly when prepare resolves. */}
+        {previewError ? (
+          <PagePreview svg={null} error={previewError}
+            paper={papers[paper] ?? null} paperName={paper}
+            showTravel={showTravel} onToggleTravel={setShowTravel} />
+        ) : previewSvg ? (
+          <PagePreview svg={previewSvg} error={null}
+            paper={papers[paper] ?? null} paperName={paper}
+            showTravel={showTravel} onToggleTravel={setShowTravel} />
+        ) : artworkSvg !== null ? (
+          <ArtworkPreview svg={artworkSvg}
+            note={job ? "preparing placement preview…" : null} />
+        ) : (
+          <PagePreview svg={null} error={null}
+            paper={papers[paper] ?? null} paperName={paper}
+            showTravel={showTravel} onToggleTravel={setShowTravel} />
+        )}
         {job && (
           <div className="job-live" data-testid="job-live">
             <div className="row">
               <StatusBadge status={job.status} />
               <b>{job.name}</b>
+              {["SENDING", "PLOTTING", "COMPLETING"].includes(String(job.status)) && (
+                <span className={`pen-badge${penDown ? " down" : ""}`} data-testid="pen-badge"
+                  title={penDown === null ? "pen state unknown (buffer-based progress)" : penDown ? "pen down" : "pen up"}>
+                  {penDown === null ? "?" : penDown ? "▼ pen down" : "▲ pen up"}
+                </span>
+              )}
               {job.error && <span className="err small">{job.error}</span>}
             </div>
             <Progress value={job.bytes_sent} total={job.bytes_total} />
+            {job.estimate && (
+              <p className="muted small" data-testid="estimate">
+                ≈ {fmtDuration(job.estimate.est_seconds)} — drawn {Math.round(job.estimate.drawn_mm)} mm
+                + travel {Math.round(job.estimate.travel_mm)} mm @ {job.estimate.velocity_cm_s} cm/s
+              </p>
+            )}
             <div className="row-actions">
               <button disabled={!canPause} onClick={() => void jobCmd(api.pauseJob)}>Pause</button>
               <button disabled={!canResume} onClick={() => void jobCmd(api.resumeJob)}>Resume</button>
@@ -484,6 +521,9 @@ export default function PlotPage() {
           {analysis?.unsupported && analysis.unsupported.length > 0 && (
             <div className="banner warn">Warnings: source contains unsupported content ({analysis.unsupported.join(", ")}) — it will not be plotted.</div>
           )}
+          {analysis?.warnings && analysis.warnings.length > 0 && (
+            <div className="banner info">Notes: non-blocking quirks in the source ({analysis.warnings.join(", ")}) — plot proceeds, outlines only where filled.</div>
+          )}
           {pensUsed.length === 0 && <div className="banner warn">No pens mapped — nothing would plot.</div>}
           <label className="confirm-check">
             <input type="checkbox" checked={confirmed} data-testid="confirm-check"
@@ -502,4 +542,15 @@ function fmtBbox(bbox: Analysis["bbox_mm"]): string {
   const b = bbox as Record<string, number | undefined>;
   const vals = [b.min_x, b.min_y, b.max_x, b.max_y].map((n) => (n ?? 0).toFixed(1));
   return `min(${vals[0]}, ${vals[1]}) max(${vals[2]}, ${vals[3]})`;
+}
+
+function clampInt(raw: string, min: number, max: number, fallback: number): number {
+  const n = Math.round(Number(raw));
+  return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : fallback;
+}
+
+function fmtDuration(s: number): string {
+  if (s < 90) return `${Math.round(s)} s`;
+  if (s < 5400) return `${(s / 60).toFixed(1)} min`;
+  return `${(s / 3600).toFixed(1)} h`;
 }

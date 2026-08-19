@@ -8,7 +8,9 @@ import Progress from "../components/Progress";
 
 /** Merge a WS job event into a jobs list row (pure — unit-tested). */
 export function applyJobEvent(jobs: Job[], ev: {
-  job_id?: string; status?: string; bytes_sent?: number; bytes_total?: number; error?: string | null;
+  job_id?: string; event?: string; status?: string; bytes_sent?: number;
+  acked_bytes?: number; total_bytes?: number;
+  bytes_total?: number; error?: string | null; pen_down?: boolean | null;
 }): Job[] {
   if (!ev.job_id) return jobs;
   let hit = false;
@@ -18,8 +20,8 @@ export function applyJobEvent(jobs: Job[], ev: {
     return {
       ...j,
       status: ev.status ?? j.status,
-      bytes_sent: ev.bytes_sent ?? j.bytes_sent,
-      bytes_total: ev.bytes_total ?? j.bytes_total,
+      bytes_sent: ev.acked_bytes ?? ev.bytes_sent ?? j.bytes_sent,
+      bytes_total: ev.total_bytes ?? ev.bytes_total ?? j.bytes_total,
       error: ev.error ?? j.error,
     };
   });
@@ -33,12 +35,17 @@ function fmtTime(epoch: number): string {
   return epoch > 0 ? new Date(epoch * 1000).toLocaleTimeString() : "—";
 }
 
+function fmtEstimate(s: number): string {
+  return s < 90 ? `≈ ${Math.round(s)} s` : `≈ ${(s / 60).toFixed(1)} min`;
+}
+
 export default function JobsPage() {
   const { toast, ws } = useApp();
   const [jobs, setJobs] = useState<Job[] | null>(null);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<Job | null>(null);
+  const [penDown, setPenDown] = useState<Record<string, boolean | null>>({});
 
   const refresh = useCallback(async () => {
     try {
@@ -58,6 +65,9 @@ export default function JobsPage() {
   useEffect(() => {
     const m = ws.last;
     if (!m || !isJobEvent(m)) return;
+    if (m.event === "progress" && m.job_id && m.pen_down != null) {
+      setPenDown((prev) => ({ ...prev, [m.job_id]: m.pen_down! }));
+    }
     setJobs((prev) => (prev ? applyJobEvent(prev, m) : prev));
     setSelected((prev) => (prev && prev.id === m.job_id ? applyJobEvent([prev], m)[0] : prev));
   }, [ws.last]);
@@ -109,14 +119,24 @@ export default function JobsPage() {
         {jobs && jobs.length > 0 && (
           <table className="jobs-table" aria-label="job history">
             <thead>
-              <tr><th>Name</th><th>Status</th><th>Bytes</th><th>Paper</th><th>Created</th><th>Updated</th><th /></tr>
+              <tr><th>Name</th><th>Status</th><th>Bytes</th><th>Estimate</th><th>Paper</th><th>Created</th><th>Updated</th><th /></tr>
             </thead>
             <tbody>
               {jobs.map((j) => (
                 <tr key={j.id} className={j.id === activeId ? "active" : ""}>
                   <td>{j.name}</td>
-                  <td><StatusBadge status={j.status} /></td>
+                  <td>
+                    <StatusBadge status={j.status} />
+                    {["SENDING", "PLOTTING", "COMPLETING"].includes(String(j.status)) && (
+                      <span className={`pen-badge${penDown[j.id] ? " down" : ""}`}
+                        data-testid={`pen-badge-${j.id.slice(0, 8)}`}
+                        title={penDown[j.id] == null ? "pen state unknown" : penDown[j.id] ? "pen down" : "pen up"}>
+                        {penDown[j.id] ? "▼" : "▲"}
+                      </span>
+                    )}
+                  </td>
                   <td className="bytes-cell"><Progress value={j.bytes_sent} total={j.bytes_total} compact /></td>
+                  <td className="muted small">{j.estimate ? fmtEstimate(j.estimate.est_seconds) : "—"}</td>
                   <td>{j.paper}</td>
                   <td>{fmtTime(j.created_at)}</td>
                   <td>{fmtTime(j.updated_at)}</td>
@@ -140,6 +160,12 @@ export default function JobsPage() {
           </div>
           <StatusBadge status={selected.status} />
           <Progress value={selected.bytes_sent} total={selected.bytes_total} />
+          {selected.estimate && (
+            <p className="muted small" data-testid="drawer-estimate">
+              Plot estimate {fmtEstimate(selected.estimate.est_seconds)} — drawn{" "}
+              {Math.round(selected.estimate.drawn_mm)} mm + travel {Math.round(selected.estimate.travel_mm)} mm @ {selected.estimate.velocity_cm_s} cm/s
+            </p>
+          )}
           <dl className="job-meta">
             <dt>ID</dt><dd>{selected.id}</dd>
             <dt>Paper</dt><dd>{selected.paper}</dd>

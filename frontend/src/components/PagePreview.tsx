@@ -27,24 +27,23 @@ export function extractViewBox(svg: string): { minX: number; minY: number; w: nu
 }
 
 /**
- * Post-processing preview: renders the /api/jobs/{id}/preview SVG (what the
- * plotter will actually draw) inside a paper rectangle with the hard-clip
- * outline. HP 7475A hard-clip spans the full loaded page, so the outline is
- * the paper edge itself.
- * ponytail: pen-up travel lines + zoom/pan skipped; add when backend exposes
- * travel geometry (e.g. stats.travel_moves) or canvas interactivity is needed.
+* plotter will actually draw) inside a paper rectangle with the hard-clip
+* Post-processing preview: renders the /api/jobs/{id}/preview SVG (what the
+ * plotter will actually draw) on the sheet background. Sheet outline, safe
+ * plot area (red dashed), axis indicators and caption are drawn by the
+ * backend annotation — the server SVG is the single source of truth.
+ * Pen-up travel lines (phase 2 F1) ship inside the server SVG as a
+ * <g class="travel-group">; this component only toggles visibility.
+ * ponytail: zoom/pan skipped; add when canvas interactivity is needed.
  */
 export default function PagePreview({
-  svg, paper, error, paperName, scalePct,
+  svg, paper, error, paperName, showTravel, onToggleTravel,
 }: {
-  svg: string | null;
-  paper: PaperInfo | null;
-  paperName: string;
-  error: string | null;
-  /** Plot scale in percent — shown in the caption so the user can see what
-   *  the preview corresponds to. */
-  scalePct?: number;
+  svg: string | null; paper: PaperInfo | null; paperName: string; error: string | null;
+  showTravel?: boolean; onToggleTravel?: (v: boolean) => void;
 }) {
+  const toggleTravel = onToggleTravel ?? (() => {});
+  const show = showTravel ?? false;
   const safe = useMemo(() => (svg ? sanitizePreviewSvg(svg) : null), [svg]);
   const vb = useMemo(() => (svg ? extractViewBox(svg) : null), [svg]);
 
@@ -65,22 +64,26 @@ export default function PagePreview({
   const paperW = portrait ? Math.min(wmm, hmm) : Math.max(wmm, hmm);
   const paperH = portrait ? Math.max(wmm, hmm) : Math.min(wmm, hmm);
   return (
-    <div className="preview-wrap" data-testid="preview-state">
+    <div className={`preview-wrap${show ? " show-travel" : ""}`} data-testid="preview-state">
+      <label className="travel-toggle small">
+        <input type="checkbox" checked={show} data-testid="travel-toggle"
+          onChange={(e) => toggleTravel(e.target.checked)} />
+        Show pen travel
+      </label>
       <svg className="page-preview" viewBox={`${vb.minX} ${vb.minY} ${vb.w} ${vb.h}`}
         role="img" aria-label={`preview for ${paperName}`}>
         {/* paper sheet */}
         <rect x={vb.minX} y={vb.minY} width={vb.w} height={vb.h}
           fill="#101418" stroke="#2a3a4a" strokeWidth={vb.w * 0.002} />
-        {/* hard-clip outline = page edge on HP 7475A */}
-        <rect x={vb.minX} y={vb.minY} width={vb.w} height={vb.h}
-          fill="none" stroke="#ff5252" strokeDasharray={`${vb.w * 0.01} ${vb.w * 0.006}`}
-          strokeWidth={vb.w * 0.0015} className="hardclip" />
+        {/* sheet outline + safe-area rect + axis arrows come from the
+            server annotation (routes._annotate_preview) — source of truth,
+            not duplicated here. */}
         {/* geometry (already pen-colored by the pipeline) */}
         <g dangerouslySetInnerHTML={{ __html: safe.includes("<svg") ? innerOf(safe) : safe }} />
       </svg>
-      <p className="small muted" data-testid="preview-caption">
-        {paperName.toUpperCase()} · {paperW.toFixed(0)}×{paperH.toFixed(0)} mm — red outline = hard-clip area
-        {` · ${scalePct ?? 100}% scale`}
+      <p className="small muted">
+        {paperName.toUpperCase()} · {paperW.toFixed(0)}×{paperH.toFixed(0)} mm — grey = sheet edge, red dashed = safe plot area
+        {paper?.loads_orientation ? ` · loads ${paper.loads_orientation}` : ""}
         {paper ? ` · DIP: ${paper.dip_mode}` : ""}
       </p>
     </div>
@@ -88,7 +91,7 @@ export default function PagePreview({
 }
 
 /** The preview SVG's inner markup (children of <svg>), for nesting. */
-function innerOf(svg: string): string {
+export function innerOf(svg: string): string {
   const open = svg.match(/<svg[^>]*>/i);
   if (!open) return svg;
   const start = svg.indexOf(open[0]) + open[0].length;

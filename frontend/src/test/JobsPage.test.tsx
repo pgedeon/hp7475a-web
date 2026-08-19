@@ -50,6 +50,13 @@ describe("applyJobEvent (pure)", () => {
     const jobs = [job({ id: "a" })];
     expect(applyJobEvent(jobs, { job_id: "zzz", status: "FAILED" })).toHaveLength(1);
   });
+  it("merges phase-2 progress frames (acked_bytes, no status key)", () => {
+    const jobs = [job({ id: "a", status: "SENDING", bytes_sent: 0, bytes_total: 100 })];
+    const next = applyJobEvent(jobs, {
+      job_id: "a", event: "progress", acked_bytes: 40, total_bytes: 100, pen_down: true,
+    });
+    expect(next[0]).toMatchObject({ status: "SENDING", bytes_sent: 40, bytes_total: 100 });
+  });
 });
 
 describe("JobsPage", () => {

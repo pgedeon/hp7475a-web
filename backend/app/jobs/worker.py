@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import queue
+import time
 import threading
 from typing import Optional
 
@@ -36,10 +37,14 @@ class HardwareWorker:
     """Serializes ALL plotter access. API layer enqueues commands; worker
     thread performs them against the driver."""
 
-    def __init__(self, store: JobStore, device_holder, settings):
+    #: WS progress events throttled to at most one per 250 ms (F3).
+    PROGRESS_THROTTLE_S = 0.25
+
+    def __init__(self, store: JobStore, device_holder, settings, publish=None):
         self._store = store
         self._devices = device_holder  # DeviceManager (main lane)
         self._settings = settings
+        self._publish = publish  # WSHub.publish (thread-safe) or None
         self._queue: "queue.Queue[tuple[str, str]]" = queue.Queue()
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
@@ -95,6 +100,27 @@ class HardwareWorker:
         with self._lock:
             return self._current_job
 
+    def _progress_publisher(self, job_id: str, total_bytes: int):
+        """Throttled WS progress publisher (F3). v1 is buffer-accounting
+        only (bytes accepted into the plotter buffer); pen_down stays None
+        during SENDING — no OA/OS polling mid-stream (sentinel safety).
+        The final event always bypasses the throttle."""
+        last = [0.0]
+
+        def pub(acked: int, pen_down: bool | None = None) -> None:
+            now = time.monotonic()
+            if acked < total_bytes and (now - last[0]) < self.PROGRESS_THROTTLE_S:
+                return
+            last[0] = now
+            if self._publish:
+                self._publish({
+                    "type": "job", "event": "progress", "job_id": job_id,
+                    "acked_bytes": acked, "total_bytes": total_bytes,
+                    "pen_down": pen_down,
+                })
+
+        return pub
+
     # -- worker loop --------------------------------------------------------------
 
     def _run(self) -> None:
@@ -135,7 +161,6 @@ class HardwareWorker:
             # FIRST or a crossed reply fails the job (observed live:
             # "bad OH reply: '16'" — an OS; poll's reply eaten by OH;).
             from app.services.serial.transport import TransportError
-
             try:
                 clip = self._devices.hard_clip_limits()
                 from app.services.serial.paper import clip_fits, get_paper
@@ -168,6 +193,8 @@ class HardwareWorker:
             self._safe_set_state(job_id, JobState.FAILED, error="device not connected")
             return
         payload = job.hpgl
+        total_bytes = len(payload.encode("ascii"))
+        publish_progress = self._progress_publisher(job_id, total_bytes)
         transport = driver.transport
         streamer = ChunkedStreamer(
             transport,
@@ -175,9 +202,8 @@ class HardwareWorker:
             default_chunk=self._settings.stream_default_chunk,
             query_timeout_s=self._settings.stream_query_timeout_s,
             max_retries=self._settings.stream_max_retries,
-            on_progress=lambda p: self._store.update(
-                job_id, bytes_sent=p.bytes_sent,
-                stats={**job.stats, "last_free": p.free_buffer},
+            on_progress=lambda p: self._on_stream_progress(
+                job_id, job.stats, publish_progress, p,
             ),
         )
         self._pause.clear()
@@ -187,7 +213,14 @@ class HardwareWorker:
             self._stream_with_pause_support(streamer, payload, job_id)
             self._safe_set_state(job_id, JobState.PLOTTING)  # all bytes buffered/accepted
             self._safe_set_state(job_id, JobState.COMPLETING)
-            driver.complete_plot(timeout=self._settings.completion_timeout_s)
+            # OS; pen-status polls during COMPLETING are sentinel-safe by
+            # design: replies queue behind the OA sentinel in parse order
+            # and are recognized by shape (driver.complete_plot). This is
+            # the ONLY mid-job OS use; none while streaming (brief F3).
+            driver.complete_plot(
+                timeout=self._settings.completion_timeout_s,
+                on_status=lambda rep: publish_progress(total_bytes, rep.pen_down),
+            )
             self._safe_set_state(job_id, JobState.COMPLETED)
             self._store.prune_history()
         except StreamInterrupted as exc:
@@ -209,6 +242,16 @@ class HardwareWorker:
             self._safe_set_state(job_id, JobState.FAILED, error=f"{type(exc).__name__}: {exc}")
         finally:
             self._devices.set_streaming(False)
+
+    def _on_stream_progress(
+        self, job_id: str, job_stats: dict, publish_progress, p
+    ) -> None:
+        """Streamer progress hook: persist bytes + publish WS event."""
+        self._store.update(
+            job_id, bytes_sent=p.bytes_sent,
+            stats={**job_stats, "last_free": p.free_buffer},
+        )
+        publish_progress(p.bytes_sent)
 
     def _safe_set_state(self, job_id: str, state, error: str | None = None) -> None:
         """set_state that tolerates the job being deleted mid-run (a DELETE
@@ -254,21 +297,26 @@ class HardwareWorker:
             return
         self._store.set_state(job_id, JobState.SENDING)
         payload = job.hpgl[job.bytes_sent :] if job.bytes_sent < len(job.hpgl) else ""
+        base = job.bytes_sent
+        total_bytes = len(job.hpgl.encode("ascii"))
+        publish_progress = self._progress_publisher(job_id, total_bytes)
         driver = self._devices.driver()
         streamer = ChunkedStreamer(
             driver.transport,
             safety_margin=self._settings.stream_safety_margin,
             default_chunk=self._settings.stream_default_chunk,
-            on_progress=lambda p: self._store.update(
-                job_id, bytes_sent=job.bytes_sent + p.bytes_sent,
-                stats={**job.stats, "last_free": p.free_buffer, "resumed": True},
+            on_progress=lambda p: self._on_resume_progress(
+                job_id, job.stats, publish_progress, base, p,
             ),
         )
         try:
             self._stream_with_pause_support(streamer, payload, job_id)
             self._store.set_state(job_id, JobState.PLOTTING)
             self._store.set_state(job_id, JobState.COMPLETING)
-            driver.complete_plot(timeout=self._settings.completion_timeout_s)
+            driver.complete_plot(
+                timeout=self._settings.completion_timeout_s,
+                on_status=lambda rep: publish_progress(total_bytes, rep.pen_down),
+            )
             self._store.set_state(job_id, JobState.COMPLETED)
         except StreamInterrupted as exc:
             reason = str(exc)
@@ -280,6 +328,15 @@ class HardwareWorker:
                 self._store.set_state(job_id, JobState.FAILED, error=reason)
         except Exception as exc:
             self._store.set_state(job_id, JobState.FAILED, error=str(exc))
+
+    def _on_resume_progress(
+        self, job_id: str, job_stats: dict, publish_progress, base: int, p
+    ) -> None:
+        self._store.update(
+            job_id, bytes_sent=base + p.bytes_sent,
+            stats={**job_stats, "last_free": p.free_buffer, "resumed": True},
+        )
+        publish_progress(base + p.bytes_sent)
 
     def _do_reset_device(self) -> None:
         driver = self._devices.driver()

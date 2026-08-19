@@ -5,7 +5,7 @@
 
 import type {
   Analysis, AppSettings, ConnectBody, ConnectResult, DeviceError, DeviceStatus,
-  HardClip, Job, JobCreateBody, PaperInfo, PortInfo, SanitizeReport, UploadSvgResult,
+  Job, JobCreateBody, PaperInfo, PortInfo, SanitizeReport, UploadSvgResult,
 } from "./types";
 
 const BASE: string = import.meta.env.VITE_API_BASE ?? "/api";
@@ -75,9 +75,6 @@ export const api = {
   identify: () => post("/device/identify"),
   deviceStatus: () => req<DeviceStatus>("/device/status"),
   deviceError: () => req<DeviceError>("/device/error"),
-  /** Plotter's current hard-clip window + detected paper (DIP switches);
-   *  paper is null (or the call errors) while disconnected. */
-  hardClip: () => req<HardClip>("/device/hard-clip"),
 
   selectPen: (pen: number) => post(`/device/pen/${pen}`),
   penUp: () => post("/device/pen-up"),
@@ -86,10 +83,28 @@ export const api = {
     post("/device/move", { x, y, units }),
   park: () => post("/device/park"),
 
-  uploadSvg: async (file: File): Promise<UploadSvgResult> => {
+  /** convert_text: server-side Inkscape text→paths (phase 3 F6). */
+  uploadSvg: async (file: File, convertText = false): Promise<UploadSvgResult> => {
     const fd = new FormData();
     fd.append("file", file, file.name);
+    fd.append("convert_text", convertText ? "true" : "false");
     return req<UploadSvgResult>("/files/svg", { method: "POST", body: fd });
+  },
+
+  /** Stored (sanitized/converted) file text — artwork preview source (F5).
+   *  `null` = "no artwork" sentinel used by callers/tests (a real fetch
+   *  always resolves to the stored SVG text; errors throw ApiError). */
+  fileRaw: async (fileId: string): Promise<string | null> => {
+    let res: Response;
+    try {
+      res = await fetch(`${BASE}/files/${fileId}/raw`);
+    } catch {
+      throw new ApiError(0, "Backend unreachable — is the server running on :8750?");
+    }
+    if (!res.ok) {
+      throw new ApiError(res.status, `HTTP ${res.status}`);
+    }
+    return res.text();
   },
 
   uploadHpgl: async (file: File): Promise<{ id: string; name: string; size: number; validation: SanitizeReport }> => {

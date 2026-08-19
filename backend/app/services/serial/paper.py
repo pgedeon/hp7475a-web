@@ -38,6 +38,16 @@ class Paper:
         y_range: (ymin, ymax) hard-clip limits in plotter units.
         dip_mode: rear-panel DIP switch mode required for this paper.
         info: user-facing note.
+        safe_area_mm: practical usable area (width, height) in mm in the
+            same axis convention as size_mm (X = carriage / long edge,
+            Y = paper motion). Defaults from the user-measured plot-area
+            doc (goal 47da763c): A4 274x192, A3 399x271 (the doc's
+            "271x399" portrait frame rotated into this convention);
+            ANSI A/B derived at 95% of the hard clip. None = treat the
+            full hard-clip rect as the safe area.
+        loads_orientation: how the sheet is loaded per the user doc
+            (caption word only - no geometry effect): A4 landscape,
+            A3 portrait ("297 mm edge across the carriage").
     """
 
     name: str
@@ -47,6 +57,8 @@ class Paper:
     y_range: tuple[int, int]
     dip_mode: str
     info: str = ""
+    safe_area_mm: tuple[float, float] | None = None
+    loads_orientation: str = "landscape"
 
     @property
     def width_units(self) -> int:
@@ -63,6 +75,23 @@ class Paper:
     @property
     def height_mm(self) -> float:
         return plotter_units_to_mm(self.height_units)
+
+    @property
+    def safe_size_mm(self) -> tuple[float, float]:
+        """Usable (width, height) in mm - safe area if defined, else clip."""
+        if self.safe_area_mm is None:
+            return (self.width_mm, self.height_mm)
+        return self.safe_area_mm
+
+    @property
+    def safe_inset_mm(self) -> tuple[float, float]:
+        """Per-axis inset (x, y) of the safe area inside the hard clip, mm."""
+        if self.safe_area_mm is None:
+            return (0.0, 0.0)
+        return (
+            (self.width_mm - self.safe_area_mm[0]) / 2.0,
+            (self.height_mm - self.safe_area_mm[1]) / 2.0,
+        )
 
     def contains(self, x: float, y: float, *, margin_units: int = 0) -> bool:
         """True if point (x, y) lies inside hard-clip limits (minus margin)."""
@@ -86,6 +115,8 @@ PAPERS: dict[str, Paper] = {
             y_range=(0, 7721),
             dip_mode="metric",
             info="Plotter must be configured in Metric mode (rear DIP).",
+            safe_area_mm=(274.0, 192.0),
+            loads_orientation="landscape",
         ),
         Paper(
             name="a3",
@@ -95,6 +126,11 @@ PAPERS: dict[str, Paper] = {
             y_range=(0, 11040),
             dip_mode="metric",
             info="Plotter must be configured in Metric mode (rear DIP).",
+            # user doc "271x399" is in the portrait/load frame; stored here
+            # landscape-first (same convention as size_mm) to stay inside
+            # the X=carriage hard clip this module pins.
+            safe_area_mm=(399.0, 271.0),
+            loads_orientation="portrait",
         ),
         Paper(
             name="a",
@@ -104,6 +140,7 @@ PAPERS: dict[str, Paper] = {
             y_range=(0, 7962),
             dip_mode="imperial",
             info="Plotter must be configured in Imperial mode (rear DIP).",
+            safe_area_mm=(245.0, 188.2),
         ),
         Paper(
             name="b",
@@ -113,6 +150,7 @@ PAPERS: dict[str, Paper] = {
             y_range=(0, 10365),
             dip_mode="imperial",
             info="Plotter must be configured in Imperial mode (rear DIP).",
+            safe_area_mm=(393.3, 245.0),
         ),
     )
 }

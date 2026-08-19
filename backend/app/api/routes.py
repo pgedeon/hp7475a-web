@@ -11,7 +11,7 @@ import logging
 from dataclasses import asdict, is_dataclass
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request, UploadFile, File, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Form, HTTPException, Request, Response, UploadFile, File, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from pathlib import Path
 from pydantic import BaseModel, Field
@@ -34,6 +34,15 @@ def _jsonable(obj: Any) -> Any:
 
 def get_state(request: Request):
     return request.app.state.container
+
+def _job_json(job) -> dict:
+    """Job dict + top-level convenience fields (phase 2 F2): ``estimate``
+    lifted from stats.pipeline.estimate when the pipeline produced one."""
+    d = job.to_dict()
+    est = (job.stats or {}).get("pipeline", {}).get("estimate")
+    if est:
+        d["estimate"] = est
+    return d
 
 
 router = APIRouter(prefix="/api")
@@ -197,7 +206,18 @@ async def device_park(request: Request) -> dict:
 # ---------------------------------------------------------------- files
 
 @router.post("/files/svg")
-async def upload_svg(request: Request, file: UploadFile = File(...)) -> dict:
+async def upload_svg(
+    request: Request, file: UploadFile = File(...),
+    convert_text: bool = Form(False),
+) -> dict:
+    """Upload + sanitize an SVG (goal 47da763c phase 3 F6).
+
+    Optional ``convert_text``: when checked and the sanitized SVG contains
+    text elements, run headless Inkscape text-to-path conversion, re-sanitize
+    its output and store THAT. Fail-soft everywhere: Inkscape missing,
+    erroring, timing out or producing sanitizer-rejected output keeps the
+    original sanitized file plus a warning in ``conversion`` — never
+    blocks the upload."""
     from app.services.pipeline.sanitizer import sanitize_svg  # pipeline lane
 
     state = get_state(request)
@@ -212,12 +232,37 @@ async def upload_svg(request: Request, file: UploadFile = File(...)) -> dict:
         raise HTTPException(
             422, {"message": "SVG rejected", "sanitize": _jsonable(report)}
         )
+    conversion = {"attempted": False, "converted": False, "warning": None}
+    if convert_text:
+        conversion["attempted"] = True
+        from app.services.pipeline.textpath import convert_text_to_paths, has_text_elements
+
+        if has_text_elements(clean):
+            converted, err = convert_text_to_paths(clean)
+            if err is not None:
+                conversion["warning"] = f"text-to-path conversion unavailable ({err})"
+            else:
+                re_clean, re_report = sanitize_svg(converted, state.settings.max_upload_bytes)
+                if getattr(re_report, "rejected", False) or not re_clean:
+                    conversion["warning"] = (
+                        "text-to-path conversion unavailable (converted output "
+                        "rejected by sanitizer: "
+                        + "; ".join(getattr(re_report, "reasons", []) or ["unknown"])
+                        + ") — original kept"
+                    )
+                else:
+                    clean, report = re_clean, re_report
+                    conversion["converted"] = True
     meta = state.files.save(
         kind="svg", name=file.filename or "upload.svg", content=clean,
-        extra={"sanitize_report": _jsonable(report)},
+        extra={"sanitize_report": _jsonable(report),
+               "text_converted": conversion["converted"],
+               "conversion": conversion},
     )
     return {"id": meta.id, "name": meta.name, "size": meta.size_bytes,
-            "sanitize": _jsonable(report)}
+            "sanitize": _jsonable(report),
+            "text_converted": conversion["converted"],
+            "conversion": conversion}
 
 
 @router.post("/files/hpgl")
@@ -263,6 +308,22 @@ async def file_analysis(file_id: str, request: Request) -> dict:
     return analysis
 
 
+@router.get("/files/{file_id}/raw")
+async def file_raw(file_id: str, request: Request) -> Response:
+    """Serve the STORED (sanitized / text-converted) file bytes — artwork
+    preview source, goal 47da763c phase 3 F5. Never the raw upload."""
+    state = get_state(request)
+    try:
+        meta = state.files.get(file_id)
+    except FileNotFoundError:
+        raise HTTPException(404, "file not found")
+    data = state.files.read_bytes(file_id)
+    if not data:
+        raise HTTPException(422, "stored file is empty (rejected upload?)")
+    media = "image/svg+xml" if meta.kind == "svg" else "text/plain"
+    return Response(content=data, media_type=media)
+
+
 # ---------------------------------------------------------------- jobs
 
 class JobCreateBody(BaseModel):
@@ -270,7 +331,6 @@ class JobCreateBody(BaseModel):
     name: str = ""
     paper: str = "a4"
     scale: float = Field(default=1.0, ge=0.25, le=1.0)
-    rotate_deg: float = Field(default=0.0)
     pen_map: dict[str, int] = Field(default_factory=dict)
     pen_map_mode: str = "layers"  # "layers" | "colors" (goal 3e598c6e)
     options: dict[str, Any] = Field(default_factory=dict)
@@ -283,8 +343,6 @@ async def create_job(body: JobCreateBody, request: Request) -> dict:
         raise HTTPException(422, f"paper must be one of {sorted(PAPERS)}")
     if body.pen_map_mode not in ("layers", "colors"):
         raise HTTPException(422, "pen_map_mode must be 'layers' or 'colors'")
-    if body.rotate_deg not in (0.0, 90.0, 180.0, 270.0):
-        raise HTTPException(422, "rotate_deg must be 0, 90, 180 or 270")
     try:
         meta = state.files.get(body.file_id)
     except FileNotFoundError:
@@ -296,22 +354,22 @@ async def create_job(body: JobCreateBody, request: Request) -> dict:
         name=body.name or meta.name, file_id=body.file_id, paper=body.paper,
         pen_map=body.pen_map,
         options={**body.options, "pen_map_mode": body.pen_map_mode,
-                 "scale": body.scale, "rotate_deg": body.rotate_deg},
+                 "scale": body.scale},
     )
-    return job.to_dict()
+    return _job_json(job)
 
 
 @router.get("/jobs")
 async def list_jobs(request: Request) -> dict:
     state = get_state(request)
-    return {"jobs": [j.to_dict() for j in state.jobs.list()],
+    return {"jobs": [_job_json(j) for j in state.jobs.list()],
             "active_job_id": state.worker.current_job_id if state.worker else None}
 
 
 @router.get("/jobs/{job_id}")
 async def get_job(job_id: str, request: Request) -> dict:
     try:
-        return get_state(request).jobs.get(job_id).to_dict()
+        return _job_json(get_state(request).jobs.get(job_id))
     except JobNotFound:
         raise HTTPException(404, "job not found")
 
@@ -329,13 +387,16 @@ def _job_command(request: Request, job_id: str, command: str) -> dict:
     return {"accepted": True, "command": command, "job_id": job_id}
 
 
-def _annotate_preview(svg_text: str, paper: str, user_scale: float,
-                      rotate_deg: float = 0.0) -> str:
-    """Overlay paper outline + size/scale caption on a vpype preview SVG.
+def _annotate_preview(svg_text: str, paper: str, user_scale: float, rotated: bool = False) -> str:
+    """Overlay sheet outline, safe-area rect, axis arrows + caption.
 
-    Gives the UI preview a visible sheet boundary so scale/paper choices
-    are judgeable at a glance (goal 91ce9220)."""
+    Goal 47da763c: TWO rects — full sheet (grey, subtle) + safe/plot area
+    (red dashed) — plus pen-carriage/paper-motion axis indicators and a
+    caption (paper, loading orientation, sheet/safe mm, scale %, ROTATED
+    badge). Pure static SVG, no scripts."""
     import re
+    from app.services.pipeline.vpy import safe_page_rect_mm
+    from app.services.serial.paper import get_paper as _gp
 
     m = re.search(
         r'viewBox="([\d.eE+-]+) ([\d.eE+-]+) ([\d.eE+-]+) ([\d.eE+-]+)"', svg_text
@@ -344,14 +405,42 @@ def _annotate_preview(svg_text: str, paper: str, user_scale: float,
         return svg_text
     w, h = float(m.group(3)), float(m.group(4))
     sw = max(1.0, w / 500)
+    p = _gp(paper)
+    # safe rect: page mm -> viewBox units (vpype preview is 96 dpi)
+    px = lambda mm: mm * 96.0 / 25.4
+    sx0, sy0, sx1, sy1 = (px(v) for v in safe_page_rect_mm(p))
+    fs = w / 55  # caption font size
     overlay = (
-        f'<rect x="1" y="1" width="{w - 2:.1f}" height="{h - 2:.1f}" fill="none" '
-        f'stroke="#adb5bd" stroke-width="{sw:.2f}" '
-        f'stroke-dasharray="{w / 200:.1f},{w / 400:.1f}"/>'
+        # full sheet outline — subtle grey, solid
+        f'<rect x="{sw:.2f}" y="{sw:.2f}" width="{w - 2 * sw:.1f}" height="{h - 2 * sw:.1f}" '
+        f'fill="none" stroke="#adb5bd" stroke-width="{sw:.2f}"/>'
+        # safe plot area — red dashed
+        f'<rect x="{sx0:.1f}" y="{sy0:.1f}" width="{sx1 - sx0:.1f}" height="{sy1 - sy0:.1f}" '
+        f'fill="none" stroke="#ff5252" stroke-width="{sw:.2f}" '
+        f'stroke-dasharray="{w / 90:.1f},{w / 220:.1f}"/>'
+        # axis indicators: X = pen carriage (horizontal), Y = paper motion
+        f'<g stroke="#868e96" stroke-width="{sw:.2f}" fill="#868e96" '
+        f'font-family="sans-serif" font-size="{fs:.1f}">'
+        f'<line x1="{w * 0.03:.1f}" y1="{h * 0.94:.1f}" x2="{w * 0.10:.1f}" y2="{h * 0.94:.1f}"/>'
+        f'<polygon points="{w * 0.10:.1f},{h * 0.94 - fs * 0.35:.1f} '
+        f'{w * 0.10 + fs * 0.7:.1f},{h * 0.94:.1f} {w * 0.10:.1f},{h * 0.94 + fs * 0.35:.1f}" '
+        f'stroke="none"/>'
+        f'<text x="{w * 0.115:.1f}" y="{h * 0.94 + fs * 0.35:.1f}" stroke="none">X pen carriage</text>'
+        f'<line x1="{w * 0.03:.1f}" y1="{h * 0.90:.1f}" x2="{w * 0.03:.1f}" y2="{h * 0.83:.1f}"/>'
+        f'<polygon points="{w * 0.03 - fs * 0.35:.1f},{h * 0.83:.1f} '
+        f'{w * 0.03:.1f},{h * 0.83 - fs * 0.7:.1f} {w * 0.03 + fs * 0.35:.1f},{h * 0.83:.1f}" '
+        f'stroke="none"/>'
+        f'<text x="{w * 0.045:.1f}" y="{h * 0.845:.1f}" stroke="none">Y paper motion</text>'
+        f'</g>'
+        # caption
         f'<text x="{w * 0.02:.1f}" y="{h * 0.035:.1f}" font-family="sans-serif" '
-        f'font-size="{w / 38:.1f}" fill="#868e96">'
-        f'{paper.upper()} \u00b7 {round(user_scale * 100)}%'
-        f'{f" \u00b7 {int(rotate_deg)}\u00b0" if rotate_deg else ""}</text>'
+        f'font-size="{fs:.1f}" fill="#868e96">'
+        f'{p.name.upper()} \u00b7 {p.loads_orientation.upper()} \u00b7 sheet '
+        f'{p.size_mm[0]:.0f}\u00d7{p.size_mm[1]:.0f} mm \u00b7 safe '
+        f'{p.safe_size_mm[0]:.0f}\u00d7{p.safe_size_mm[1]:.0f} mm \u00b7 '
+        f'{round(user_scale * 100)}%'
+        + (' \u00b7 <tspan fill="#ff5252" font-weight="bold">ROTATED</tspan>' if rotated else "")
+        + '</text>'
     )
     cut = svg_text.index(">", svg_text.index("<svg")) + 1
     return svg_text[:cut] + overlay + svg_text[cut:]
@@ -411,6 +500,12 @@ async def prepare_job(job_id: str, request: Request) -> dict:
                 else:
                     result = run_pipeline(meta.stored_path, job.paper, opts, job.pen_map)
             except Exception as exc:
+                # record WHY on the job (stays QUEUED → re-preparable;
+                # goal 47da763c phase-3 wart fix), then 422 the caller
+                try:
+                    state.jobs.update(job_id, error=f"pipeline failed: {exc}")
+                except Exception:
+                    logger.debug("could not record pipeline error on job", exc_info=True)
                 raise HTTPException(422, f"pipeline failed: {exc}")
             preview_dir = state.settings.data_dir / "previews"
             preview_dir.mkdir(parents=True, exist_ok=True)
@@ -420,7 +515,7 @@ async def prepare_job(job_id: str, request: Request) -> dict:
                 _stats = result.stats or {}
                 pv_text = _annotate_preview(
                     pv_text, job.paper, float(_stats.get("user_scale", 1.0)),
-                    float(_stats.get("rotate_deg", 0.0)),
+                    rotated=bool(job.options.get("rotate_90")),
                 )
                 preview_path.write_text(pv_text)
             except OSError:
@@ -530,6 +625,8 @@ async def papers() -> dict:
             "y_range": p.y_range,
             "dip_mode": p.dip_mode,
             "info": p.info,
+            "safe_area_mm": p.safe_area_mm,
+            "loads_orientation": p.loads_orientation,
         }
         for name, p in PAPERS.items()
     }
@@ -545,6 +642,21 @@ async def ws_status(ws: WebSocket) -> None:
     state = ws.app.state.container
     cid = await state.ws_hub.connect(ws)
     try:
+        # F3: on (re)connect, resume event for the active job so a client
+        # that dropped mid-plot restores its progress bar immediately.
+        active = state.worker.current_job_id
+        if active:
+            try:
+                job = state.jobs.get(active)
+                await ws.send_text(json.dumps({
+                    "type": "job", "event": "resume", "job_id": job.id,
+                    "status": job.status.value,
+                    "acked_bytes": job.bytes_sent,
+                    "total_bytes": job.bytes_total,
+                    "pen_down": None,
+                }))
+            except Exception:
+                logger.debug("ws resume snapshot failed", exc_info=True)
         while True:
             # Client pings keep the socket alive; content ignored.
             await ws.receive_text()

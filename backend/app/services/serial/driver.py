@@ -248,7 +248,10 @@ class HP7475ADevice:
         self._transport.write(protocol.HPGL_OUTPUT_ACTUAL_POSITION.encode())
         responder = self._responder()
         deadline = time.monotonic() + timeout
-        next_poll = time.monotonic() + poll_interval if on_status is not None else None
+        # poll OS; immediately at entry (mirrors await_completion): the
+        # sentinel OA; was written first, so its reply still leads the
+        # queue and the trailing OS; reply yields the pen state.
+        next_poll = time.monotonic() if on_status is not None else None
         while True:
             now = time.monotonic()
             if now >= deadline:
@@ -265,7 +268,12 @@ class HP7475ADevice:
             except ResponderError:
                 continue  # transient; deadline re-checked above
             try:
-                return responder.parse_position(line)
+                parsed = responder.parse_position(line)
+                if on_status is not None:
+                    # best-effort pen state from the OS; reply queued
+                    # behind the (already-consumed) sentinel
+                    self._consume_trailing_status(responder, on_status)
+                return parsed
             except ResponderError:
                 self._maybe_status(line, on_status)
 

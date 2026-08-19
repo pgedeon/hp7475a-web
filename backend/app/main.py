@@ -39,7 +39,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         hub = WSHub()
         devices = DeviceManager()
         files = FileRegistry(settings.data_dir / "files", settings.max_upload_bytes)
-        worker = HardwareWorker(jobs, devices, settings)
+        worker = HardwareWorker(jobs, devices, settings, publish=hub.publish)
         jobs.subscribe(lambda job: hub.publish({
             "type": "job", "job_id": job.id, "status": job.status.value,
             "bytes_sent": job.bytes_sent, "bytes_total": job.bytes_total,

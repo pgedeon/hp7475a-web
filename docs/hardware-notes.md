@@ -167,3 +167,54 @@ this model — the UI must not pretend otherwise.
   different machine. All automated testing therefore runs against the PTY fake
   plotter (spec §35); real-device validation stays `READY FOR USER HARDWARE
   TEST`.
+
+## 11. Paper loading orientation & usable area (2026-08-19)
+
+**Loading rule:** A4 (297×210) loads **landscape**; A3 (420×297) loads
+**portrait**. In both cases the 297 mm edge runs across the pen carriage
+(X axis); paper motion is always Y. X usable width is therefore the same for
+A4 and A3.
+
+Two different area notions — do not conflate:
+
+- **Hard-clip (§7-2, protocol truth):** the plotter clips at the full loaded
+  page. a4 = 274.7×192.1 mm, a3 = 401.7×274.7 mm (carriage X × paper-motion Y).
+- **Practical safe area (software default, user-measured/spec):** A4
+  ≈ 274×192 mm; A3 ≈ 271×399 mm *expressed in the portrait loading frame*
+  (long side on paper motion). In the carriage frame used by the pipeline this
+  is 399×271 mm — i.e. the same rectangle as the A3 hard-clip inset to a
+  round number. ANSI A/B default to 95% of hard-clip until measured.
+
+The pipeline centers the safe rect inside the hard-clip rect and applies the
+user margin (`options.margin_mm`, 5–25 mm, default 10) *inside* the safe rect,
+so artwork never approaches the physical clip. The `loads_orientation` field
+(a4=landscape, a3=portrait) is caption/UX wording only — geometry stays in the
+landscape-first carriage frame of §7-2.
+## 12. Phase 2 pipeline options (2026-08-19)
+
+**Velocity (`options.velocity_cm_s`)** — emitted as `VS n;` in the HP-GL
+stream only when it differs from the plotter default (38.1 cm/s). Values are
+quantized in software to the §7 grid (0.38 cm/s steps, min 0.38, max 38.1):
+e.g. 10.0 → `VS9.88;`, 20.14 → `VS20.14;`. Out-of-range values are rejected
+at job creation (422).
+
+**Plot-time estimate** — computed at prepare time from the finished geometry:
+`drawn_mm / velocity + travel_mm / TRAVEL_VELOCITY + pen_changes ×
+PEN_CHANGE_OVERHEAD_S` with `PEN_CHANGE_OVERHEAD_S = 2.0` (pen change park +
+fetch, software constant — measure on hardware and tune in
+`backend/app/services/pipeline/vpy.py`). Surfaces on the READY job JSON as
+`estimate: {drawn_mm, travel_mm, velocity_cm_s, est_seconds}`. Estimate only;
+the plotter makes no time promises.
+
+**Pen-up travel preview (F1)** — the preview SVG embeds a `travel-group`
+layer of dashed polylines showing pen-up moves (incl. the final park move).
+The HP-GL stream is untouched: travel lines exist only in the preview file;
+the UI toggles visibility via a CSS class (no re-fetch).
+
+**Multi-copy tiling (`options.copies` = `{rows, cols, spacing_mm}`)** —
+tiles the *artwork at its normal single-copy size*; never silently shrinks.
+rows/cols 1–20, spacing ≥ 0. If the resulting grid exceeds the plottable
+area, prepare fails 422 with the needed size and the max grid that fits
+("reduce copies, spacing, or lower the scale option"). Pen sort runs AFTER
+tiling (whole-page travel optimization); SP order unchanged. Grid extents are
+reported in job stats (`stats.pipeline.grid_mm`).

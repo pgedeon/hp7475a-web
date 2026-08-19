@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 
 from app.services.serial.paper import PAPERS, Paper, get_paper, plotter_units_to_mm
 
-__all__ = ["SvgAnalysis", "analyze_svg", "FIT_MARGIN_MM"]
+__all__ = ["SvgAnalysis", "analyze_svg", "FIT_MARGIN_MM", "hints_for"]
 
 #: Margin used by the paper-fit *estimate* (spec §22 uses a conservative
 #: default; the pipeline itself takes its own configurable margin).
@@ -52,19 +52,31 @@ class SvgAnalysis:
         stroke_colors: stroke color values in first-seen document order.
         layers: Inkscape layer labels (``inkscape:groupmode="layer"``), or
             ids of top-level ``<g>`` elements when no Inkscape layers exist.
-        unsupported: warnings for content the vector pipeline cannot plot
-            (text, raster images, filters, non-none fills, gradients,
-            markers, clip-paths, masks, patterns).
+        unsupported: BLOCKERS — content the vector pipeline cannot plot as-is
+            (text, raster images, filters, gradients, markers, clip-paths,
+            masks, patterns). Plotting proceeds only after conversion/removal.
+        warnings: NON-BLOCKING quirks (goal 47da763c phase 3): currently
+            fills — vpype extracts their outlines, so the plot proceeds with
+            outline-only rendering of filled shapes.
+        hints: per-warning action hint (goal 47da763c phase 3 F7) — keys
+            mirror ``unsupported``/``warnings`` strings exactly; value = what
+            to do.
         est_paper_fit: per paper name (PAPERS keys) whether the estimated
             bbox fits inside the hard-clip area minus FIT_MARGIN_MM, in
             either orientation.
+        fit_rotate90: per paper name whether the bbox fits only after a
+            90-degree rotation (swapped w/h) — powers the UI "fits when
+            rotated" tip (goal 47da763c). Suggestion only, never applied.
     """
 
     bbox_mm: tuple[float, float, float, float] | None
     stroke_colors: list[str] = field(default_factory=list)
     layers: list[str] = field(default_factory=list)
     unsupported: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    hints: dict[str, str] = field(default_factory=dict)
     est_paper_fit: dict[str, bool] = field(default_factory=dict)
+    fit_rotate90: dict[str, bool] = field(default_factory=dict)
 
 
 def analyze_svg(clean_bytes: bytes) -> SvgAnalysis:
@@ -82,17 +94,64 @@ def analyze_svg(clean_bytes: bytes) -> SvgAnalysis:
 
     colors = _stroke_colors(root)
     layers = _layer_names(root)
-    unsupported = _unsupported(root)
+    blockers, warnings = _unsupported(root)
+    hints = {**hints_for(blockers), **hints_for(warnings)}
     bbox = _bbox_mm(root, clean_bytes)
-    fit = _paper_fit(bbox)
+    fit, fit_rot = _paper_fit(bbox)
 
     return SvgAnalysis(
         bbox_mm=bbox,
         stroke_colors=colors,
         layers=layers,
-        unsupported=unsupported,
+        unsupported=blockers,
+        warnings=warnings,
+        hints=hints,
         est_paper_fit=fit,
+        fit_rotate90=fit_rot,
     )
+
+# F7: actionable companion for each unsupported/warning string (key = the
+# warning description before the ": N" count suffix).
+_ACTION_HINTS: dict[str, str] = {
+    "text elements (convert to paths before plotting)":
+        "enable 'Convert text to paths' when uploading (server-side Inkscape)",
+    "raster <image> elements (cannot be plotted as vectors)":
+        "rasters cannot be plotted — embed as separate reference or trace to vectors",
+    "filled shapes (outline-only pipeline plots their outlines)":
+        "outline-only: fills are ignored; use stroked shapes for filled areas",
+    "filter definitions/effects":
+        "remove filter effects — they cannot be plotted",
+    "elements with filter applied":
+        "remove filter effects — they cannot be plotted",
+    "gradient definitions":
+        "flatten gradients to solid stroke colors",
+    "fill gradient/paint-server references":
+        "flatten gradients to solid stroke colors",
+    "stroke gradient/paint-server references":
+        "flatten gradients to solid stroke colors",
+    "marker definitions":
+        "remove markers (line-end decorations are not plotted)",
+    "elements with markers applied":
+        "remove markers (line-end decorations are not plotted)",
+    "clip-path definitions":
+        "remove clip-paths or pre-clip the geometry",
+    "elements with clip-path applied":
+        "remove clip-paths or pre-clip the geometry",
+    "mask definitions":
+        "remove masks — masked geometry cannot be plotted",
+    "pattern definitions":
+        "remove patterns or convert patterned areas to stroked outlines",
+}
+
+
+def hints_for(warnings: list[str]) -> dict[str, str]:
+    """Map each unsupported/warning string to its action hint (F7)."""
+    out: dict[str, str] = {}
+    for warning in warnings:
+        desc = warning.rsplit(": ", 1)[0]
+        if desc in _ACTION_HINTS:
+            out[warning] = _ACTION_HINTS[desc]
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -154,12 +213,18 @@ def _layer_names(root: ET.Element) -> list[str]:
 # unsupported content
 # --------------------------------------------------------------------------
 
-def _unsupported(root: ET.Element) -> list[str]:
-    """Warnings for non-plottable content (spec §15: never silently dropped)."""
-    counts: dict[str, int] = {}
+def _unsupported(root: ET.Element) -> tuple[list[str], list[str]]:
+    """(blockers, warnings) for non-ideal content (spec §15: never silently
+    dropped). Blockers stop nothing at upload time but mean the content will
+    NOT be plotted as-is; warnings are quirks the pipeline absorbs (fills →
+    outlines)."""
+    counts: dict[str, int] = {}   # blockers
+    warns: dict[str, int] = {}    # non-blocking
 
-    def bump(key: str) -> None:
-        counts[key] = counts.get(key, 0) + 1
+    def bump(key: str, warning: bool = False) -> None:
+        (warns if warning else counts)[key] = (
+            (warns if warning else counts).get(key, 0) + 1
+        )
 
     for el in root.iter():
         name = _localname(el.tag)
@@ -183,7 +248,10 @@ def _unsupported(root: ET.Element) -> list[str]:
         if name in _FILLABLE:
             fill = (el.get("fill") or "").strip().lower()
             if fill and fill != "none":
-                bump("non-'none' fills (outline-only pipeline ignores fills)")
+                bump(
+                    "filled shapes (outline-only pipeline plots their outlines)",
+                    warning=True,
+                )
         if el.get("filter") is not None:
             bump("elements with filter applied")
         if el.get("clip-path"):
@@ -195,7 +263,8 @@ def _unsupported(root: ET.Element) -> list[str]:
             if ref.strip().lower().startswith("url("):
                 bump(f"{attr} gradient/paint-server references")
 
-    return [f"{desc}: {n}" for desc, n in counts.items()]
+    fmt = lambda d: [f"{desc}: {n}" for desc, n in d.items()]  # noqa: E731
+    return fmt(counts), fmt(warns)
 
 
 # --------------------------------------------------------------------------
@@ -278,8 +347,10 @@ def _declared_bbox_px(root: ET.Element) -> tuple[float, float, float, float] | N
 # paper fit
 # --------------------------------------------------------------------------
 
-def _paper_fit(bbox_mm: tuple[float, float, float, float] | None) -> dict[str, bool]:
-    """Fit estimate per PAPERS, orientation-agnostic, EXACT fit allowed.
+def _paper_fit(
+    bbox_mm: tuple[float, float, float, float] | None,
+) -> tuple[dict[str, bool], dict[str, bool]]:
+    """Fit estimate per PAPERS: (either-orientation, rotated-only).
 
     A design exactly the size of the paper fits (the pipeline scales to
     fit inside its safety margin — est_paper_fit answers 'can this go on
@@ -287,14 +358,16 @@ def _paper_fit(bbox_mm: tuple[float, float, float, float] | None) -> dict[str, b
     210×297 design reported a4:false and the UI auto-picked A3 while the
     plotter was DIP-switched to A4 → clamped coords → vertical lines."""
     if bbox_mm is None:
-        return {name: False for name in PAPERS}
+        return {name: False for name in PAPERS}, {name: False for name in PAPERS}
     x0, y0, x1, y1 = bbox_mm
     w, h = x1 - x0, y1 - y0
     result: dict[str, bool] = {}
+    rotated: dict[str, bool] = {}
     for name, paper in PAPERS.items():
         pw, ph = paper.size_mm
         result[name] = (w <= pw and h <= ph) or (w <= ph and h <= pw)
-    return result
+        rotated[name] = w <= ph and h <= pw
+    return result, rotated
 
 
 def paper_for(name: str) -> Paper:

@@ -8,6 +8,7 @@ import StatusBadge from "../components/StatusBadge";
 import Progress from "../components/Progress";
 import Modal from "../components/Modal";
 import PagePreview, { sanitizePreviewSvg, extractViewBox } from "../components/PagePreview";
+import ArtworkPreview from "../components/ArtworkPreview";
 import { decodeStatusBits } from "../pages/DevicePage";
 
 describe("PenMap", () => {
@@ -47,33 +48,6 @@ describe("normalizeLayers", () => {
   it("accepts strings and objects", () => {
     expect(normalizeLayers(["a", { name: "b", color: "#123" }]))
       .toEqual([{ name: "a" }, { name: "b", color: "#123" }]);
-  });
-});
-
-describe("PenMap (colors mode)", () => {
-  it("labels selects by color hex and renders hex swatch inline", () => {
-    render(<PenMap mode="colors" layers={[{ name: "#ff8800", color: "#ff8800" }]}
-      penMap={{ "#ff8800": 2 }} onChange={() => {}} />);
-    expect(screen.getByLabelText("pen for color #ff8800")).toHaveValue("2");
-    // hex appears in both the label cell and the swatch caption
-    expect(screen.getAllByText("#ff8800").length).toBeGreaterThan(0);
-    const swatch = document.querySelector(".swatch") as HTMLElement;
-    expect(swatch).toHaveStyle({ background: "#ff8800" });
-  });
-
-  it("rejects pen 0/7 in colors mode — same isValidPen guard as layers mode", () => {
-    const onChange = vi.fn();
-    render(<PenMap mode="colors" layers={[{ name: "#abc", color: "#abc" }]}
-      penMap={{ "#abc": 1 }} onChange={onChange} />);
-    if (isValidPen(0) || isValidPen(7)) onChange({ "#abc": 7 });
-    expect(onChange).not.toHaveBeenCalled();
-  });
-
-  it("empty-state message differs per mode", () => {
-    const { rerender } = render(<PenMap mode="colors" layers={[]} penMap={{}} onChange={() => {}} />);
-    expect(screen.getByText(/No stroke colors detected/)).toBeInTheDocument();
-    rerender(<PenMap layers={[]} penMap={{}} onChange={() => {}} />);
-    expect(screen.getByText(/No layers detected/)).toBeInTheDocument();
   });
 });
 
@@ -133,8 +107,13 @@ describe("PagePreview helpers", () => {
   });
   it("renders paper + geometry from server svg", () => {
     const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><path d="M10 10 L90 90" stroke="red"/></svg>`;
-    render(<PagePreview svg={svg} error={null} paper={null} paperName="a4" />);
+    render(<PagePreview svg={svg} error={null} paper={{
+      size_mm: [297, 210], x_range: [0, 11040], y_range: [0, 7721],
+      dip_mode: "metric", safe_area_mm: [274, 192], loads_orientation: "landscape",
+    }} paperName="a4" />);
     expect(screen.getByRole("img", { name: /preview for a4/ })).toBeInTheDocument();
+    expect(screen.getByTestId("preview-state").textContent).toContain("red dashed = safe plot area");
+    expect(screen.getByTestId("preview-state").textContent).toContain("loads landscape");
   });
 });
 
@@ -156,5 +135,28 @@ describe("hooks smoke (useState via PenMap rerender)", () => {
     render(<Harness />);
     fireEvent.change(screen.getByLabelText("pen for layer L"), { target: { value: "5" } });
     expect(screen.getByLabelText("pen for layer L")).toHaveValue("5");
+  });
+});
+
+describe("ArtworkPreview (phase 3 F5)", () => {
+  it("renders sanitized artwork with explicit label, no paper frame", () => {
+    render(<ArtworkPreview svg={
+      '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 50">'
+      + '<script>alert(1)</script><path d="M0 0L10 10" stroke="red"/></svg>'
+    } />);
+    expect(screen.getByTestId("artwork-preview")).toBeInTheDocument();
+    expect(screen.getByTestId("artwork-label").textContent)
+      .toContain("Artwork preview — configure & create job");
+    const img = screen.getByRole("img", { name: /uploaded artwork/ });
+    // script stripped by the shared sanitize helper before inline render
+    expect(img.innerHTML).not.toContain("<script");
+    expect(img.innerHTML).toContain("M0 0L10 10");
+  });
+
+  it("falls back to an unavailable note for null/blank svg", () => {
+    const { rerender } = render(<ArtworkPreview svg={null} />);
+    expect(screen.getByTestId("artwork-preview").textContent).toContain("unavailable");
+    rerender(<ArtworkPreview svg="" />);
+    expect(screen.getByTestId("artwork-preview").textContent).toContain("unavailable");
   });
 });

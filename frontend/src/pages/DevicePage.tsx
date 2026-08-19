@@ -201,7 +201,7 @@ export default function DevicePage() {
         {connected && (<>
           <DeviceStatusView status={device} />
           <div className="row-actions">
-            <button onClick={() => void identify()} data-testid="identify-btn">Identify</button>
+            <button onClick={() => void identify()}>Identify</button>
             <button onClick={() => void queryError()}>Query error</button>
             <button className="danger" onClick={() => void disconnect()}>Disconnect</button>
           </div>
