@@ -242,7 +242,10 @@ describe("PlotPage", () => {
       fireEvent.click(screen.getByTestId("prepare-btn"));
     });
     expect(mockApi.createJob).toHaveBeenCalledWith(
-      expect.objectContaining({ file_id: "f1", paper: "a4", pen_map: { cut: 1 } })
+      expect.objectContaining({
+        file_id: "f1", paper: "a4",
+        pen_map_mode: "colors", pen_map: { "#f00": 1 },
+      })
     );
     expect(mockApi.prepareJob).toHaveBeenCalledWith("job-1");
 
@@ -427,5 +430,70 @@ describe("PlotPage phase 3 — instant artwork preview, convert option, hints", 
     await screen.findByTestId("analysis");
     expect(screen.getByTestId("conversion-warning").textContent)
       .toContain("Inkscape not installed");
+  });
+});
+
+/** Regression (goal f9a9af59, restores goal 3e598c6e wiring lost in 3c05a9c):
+ * the UI must tell the backend HOW pen_map keys are keyed — color-keyed maps
+ * without pen_map_mode:"colors" are silently ignored by the pipeline and
+ * everything plots with default pens (user-reported: single pen 1). */
+describe("PlotPage pen mapping mode (By Layer / By Color)", () => {
+  async function uploadWith(analysis: Record<string, unknown>) {
+    mockApi.uploadSvg.mockResolvedValue({ id: "f1", name: "c.svg", size: 1, sanitize: {} });
+    mockApi.analysis.mockResolvedValue(analysis);
+    mockApi.createJob.mockResolvedValue({ ...JOB });
+    mockApi.prepareJob.mockResolvedValue({ accepted: true });
+    render(ui(<PlotPage />));
+    await act(async () => {
+      fireEvent.change(await screen.findByLabelText("SVG file"), {
+        target: { files: [new File(["x"], "c.svg")] },
+      });
+    });
+    await screen.findByTestId("analysis");
+  }
+
+  it("layer-less multi-color SVG defaults to By Color and sends pen_map_mode colors", async () => {
+    await uploadWith({ layers: [], stroke_colors: ["#ff0000", "#00ff00", "#0000ff"], unsupported: [] });
+    expect(screen.getByTestId("mode-colors")).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByLabelText("pen for color #00ff00")).toHaveValue("2");
+    await act(async () => { fireEvent.click(screen.getByTestId("prepare-btn")); });
+    expect(mockApi.createJob).toHaveBeenCalledWith(expect.objectContaining({
+      pen_map_mode: "colors",
+      pen_map: { "#ff0000": 1, "#00ff00": 2, "#0000ff": 3 },
+    }));
+  });
+
+  it("toggle switches grouping; per-mode assignments are kept", async () => {
+    await uploadWith({ layers: ["cut", "engrave"], stroke_colors: ["#ff0000"], unsupported: [] });
+    expect(screen.getByTestId("mode-layers")).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByLabelText("pen for layer cut")).toHaveValue("1");
+
+    fireEvent.click(screen.getByTestId("mode-colors"));
+    expect(screen.getByLabelText("pen for color #ff0000")).toHaveValue("1");
+    await act(async () => { fireEvent.click(screen.getByTestId("prepare-btn")); });
+    expect(mockApi.createJob).toHaveBeenCalledWith(expect.objectContaining({
+      pen_map_mode: "colors",
+      pen_map: { "#ff0000": 1 },
+    }));
+
+    // back to layers — the layer assignments survive the color detour
+    fireEvent.click(screen.getByTestId("mode-layers"));
+    expect(screen.getByLabelText("pen for layer cut")).toHaveValue("1");
+    await act(async () => { fireEvent.click(screen.getByTestId("prepare-btn")); });
+    expect(mockApi.createJob).toHaveBeenLastCalledWith(expect.objectContaining({
+      pen_map_mode: "layers",
+      pen_map: { cut: 1, engrave: 2 },
+    }));
+  });
+
+  it("no stroke colors: By Color falls back to layer mapping", async () => {
+    await uploadWith({ layers: ["A"], stroke_colors: [], unsupported: [] });
+    expect(screen.getByTestId("color-mode-unavailable")).toBeInTheDocument();
+    expect(screen.getByLabelText("pen for layer A")).toBeInTheDocument();
+    await act(async () => { fireEvent.click(screen.getByTestId("prepare-btn")); });
+    expect(mockApi.createJob).toHaveBeenCalledWith(expect.objectContaining({
+      pen_map_mode: "layers",
+      pen_map: { A: 1 },
+    }));
   });
 });

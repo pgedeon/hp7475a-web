@@ -123,10 +123,15 @@ export interface JobEstimate {
   est_seconds: number;
 }
 
+/** How pen_map keys are interpreted: Inkscape layer names or stroke-color hexes. */
+export type PenMapMode = "layers" | "colors";
+
 export interface JobCreateBody {
   file_id: string;
   name?: string;
   paper: string;
+  /** "layers" (default) | "colors" — selects pen_map key semantics. */
+  pen_map_mode?: PenMapMode;
   pen_map: Record<string, number>;
   options: Record<string, unknown>;
 }

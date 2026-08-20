@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import { api, apiErrorMessage, ApiError } from "../api/client";
-import type { Analysis, Job, UploadSvgResult } from "../api/types";
+import type { Analysis, Job, PenMapMode, UploadSvgResult } from "../api/types";
 import { PAPER_NAMES, isJobEvent } from "../api/types";
 import { useApp } from "../state/app";
 import PenMap, { normalizeLayers } from "../components/PenMap";
@@ -47,7 +47,8 @@ export default function PlotPage() {
   const [file, setFile] = useState<UploadSvgResult | null>(null);
   const [analysis, setAnalysis] = useState<Analysis | null>(null);
   const [analysisError, setAnalysisError] = useState<string | null>(null);
-  const [penMap, setPenMap] = useState<Record<string, number>>({});
+  const [mapMode, setMapMode] = useState<PenMapMode>("layers");
+  const [penMaps, setPenMaps] = useState<Record<PenMapMode, Record<string, number>>>({ layers: {}, colors: {} });
   const [paper, setPaper] = useState<string>("a4");
   const [opts, setOpts] = useState<OptState>(DEFAULT_OPTS);
   const [rotate, setRotate] = useState(false);
@@ -69,11 +70,19 @@ export default function PlotPage() {
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
 
-  const layers = useMemo(() => {
-    const ls = normalizeLayers(analysis?.layers);
-    if (ls.length > 0) return ls;
-    return (analysis?.stroke_colors ?? []).map((c, i) => ({ name: c, color: c, index: i } as { name: string; color?: string; index?: number }));
-  }, [analysis]);
+  const layers = useMemo(() => normalizeLayers(analysis?.layers), [analysis]);
+  const strokeColors = useMemo(() => analysis?.stroke_colors ?? [], [analysis]);
+  // Effective mapping mode (goal 3e598c6e): wanted mode vs defensive fallback —
+  // files without stroke colors can't map by color, so layers are shown.
+  const mode: PenMapMode =
+    mapMode === "colors" && strokeColors.length === 0 ? "layers" : mapMode;
+  const colorModeUnavailable = mapMode === "colors" && mode === "layers";
+  const penMap = penMaps[mode];
+  const setPenMap = (next: Record<string, number>) =>
+    setPenMaps((s) => ({ ...s, [mode]: next }));
+  const mappingRows = mode === "colors"
+    ? strokeColors.map((c) => ({ name: c, color: c }))
+    : layers;
 
   // Artwork w/h (mm) from analysis bbox — drives the orientation label
   // and the "fits only when rotated" tip (goal 47da763c).
@@ -111,11 +120,17 @@ export default function PlotPage() {
       try {
         const a = await api.analysis(meta.id);
         setAnalysis(a);
+        // Default: layer mapping only when Inkscape layers exist AND >1;
+        // otherwise colors are the natural grouping (goal 3e598c6e).
         const ls = normalizeLayers(a.layers);
-        const names = ls.length ? ls.map((l) => l.name) : (a.stroke_colors ?? []);
-        const map: Record<string, number> = {};
-        names.slice(0, 6).forEach((n, i) => { map[n] = (i % 6) + 1; });
-        setPenMap(map);
+        const m: PenMapMode = ls.length > 1 ? "layers" : "colors";
+        const seed = (names: string[]): Record<string, number> => {
+          const map: Record<string, number> = {};
+          names.slice(0, 6).forEach((n, i) => { map[n] = (i % 6) + 1; });
+          return map;
+        };
+        setMapMode(m);
+        setPenMaps({ layers: seed(ls.map((l) => l.name)), colors: seed(a.stroke_colors ?? []) });
       } catch (e) {
         setAnalysisError(apiErrorMessage(e));
       }
@@ -143,7 +158,8 @@ export default function PlotPage() {
       options.velocity_cm_s = velocity;
       if (copies.rows > 1 || copies.cols > 1) options.copies = copies;
       const j = await api.createJob({
-        file_id: file.id, name: file.name, paper, pen_map: penMap, options,
+        file_id: file.id, name: file.name, paper,
+        pen_map: penMap, pen_map_mode: mode, options,
       });
       setJob(j); setPreviewSvg(null); setPreviewError(null);
       await api.prepareJob(j.id);
@@ -349,8 +365,19 @@ export default function PlotPage() {
         <h2>2 · Configure</h2>
         {!file && <p className="muted" data-testid="configure-empty">Upload a file to configure pens, optimization and paper.</p>}
         {file && (<>
-          <h3>Pen mapping (layer → pen 1–6)</h3>
-          <PenMap layers={layers} penMap={penMap} onChange={setPenMap} />
+          <h3>Pen mapping ({mode === "colors" ? "stroke color → pen 1–6" : "layer → pen 1–6"})</h3>
+          <div className="mode-toggle" role="group" aria-label="pen mapping mode" data-testid="pen-mode">
+            <button type="button" aria-pressed={mode === "layers"} data-testid="mode-layers"
+              onClick={() => setMapMode("layers")}>By Layer</button>
+            <button type="button" aria-pressed={mode === "colors"} data-testid="mode-colors"
+              onClick={() => setMapMode("colors")}>By Color</button>
+          </div>
+          {colorModeUnavailable && (
+            <p className="muted small" role="note" data-testid="color-mode-unavailable">
+              Analysis reported no stroke colors for this file — layer mapping shown.
+            </p>
+          )}
+          <PenMap mode={mode} layers={mappingRows} penMap={penMap} onChange={setPenMap} />
 
           <h3>Optimization</h3>
           <div className="opt-grid" role="group" aria-label="optimization options">

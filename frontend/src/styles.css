@@ -127,6 +127,9 @@ tr.selected td, tr.active td { background: #16202b; }
 .opt-grid { display: flex; gap: 16px; flex-wrap: wrap; }
 .paper-select label, .step-row label { padding: 4px 10px; border: 1px solid var(--border); border-radius: 6px; }
 .paper-select label.selected { border-color: var(--accent); background: #241d0e; }
+.mode-toggle { display: inline-flex; gap: 0; margin: 4px 0 10px; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.mode-toggle button { background: transparent; color: var(--muted); border: none; border-radius: 0; padding: 5px 14px; cursor: pointer; }
+.mode-toggle button[aria-pressed="true"] { background: var(--panel); color: var(--accent); }
 
 .progress {
   position: relative; background: #0a0e12; border: 1px solid var(--border);
