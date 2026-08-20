@@ -117,3 +117,34 @@ def test_fills_are_warnings_not_blockers():
     assert len(a.warnings) == 1
     assert "filled shapes" in a.warnings[0]
     assert a.layers == []  # fill-only: pen map falls back to single layer "1"
+
+
+# --------------------------------------------------------------------------
+# Regression (2026-08-20): numpy scalar leak through bbox/paper-fit
+# --------------------------------------------------------------------------
+
+def test_bezier_fit_bools_json_serializable():
+    """svgelements returns np.float64 for bezier bbox extrema; _paper_fit
+    comparisons then produced np.bool_ (numpy>=2 names it ``bool``), which
+    is NOT a bool subclass — json.dumps raised TypeError persisting
+    meta.json and GET /analysis 500'd (four_color_3d_vortex_tunnel.svg)."""
+    import json
+    from dataclasses import asdict
+
+    a = _analyze("bezier-colors.svg")
+    assert a.bbox_mm is not None
+    assert a.est_paper_fit["a4"] is True  # identity — np.True_ would fail
+    json.dumps(asdict(a))  # must not raise
+
+
+def test_paper_fit_coerces_numpy_scalars():
+    """_paper_fit must emit plain bools even when fed numpy floats."""
+    import numpy as np
+
+    from app.services.pipeline.analyzer import _paper_fit
+
+    fit, rot = _paper_fit(
+        (np.float64(0.0), np.float64(0.0), np.float64(290.0), np.float64(150.0))
+    )
+    assert fit["a4"] is True    # fits unrotated (290x150 in 297x210)
+    assert rot["a4"] is False   # does NOT need/require rotation

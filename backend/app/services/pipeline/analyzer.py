@@ -279,11 +279,15 @@ def _bbox_mm(root: ET.Element, clean_bytes: bytes) -> tuple[float, float, float,
     if bbox_px is None:
         return None
     x0, y0, x1, y1 = bbox_px
+    # svgelements returns np.float64 for bezier bbox extrema (plain floats
+    # for straight-line shapes); coerce so the dataclass honors its float
+    # contract and downstream fit comparisons yield plain Python bools
+    # (np.bool_ cannot subclass bool — json.dumps TypeError, 2026-08-20).
     return (
-        round(x0 * _PX_TO_MM, 3),
-        round(y0 * _PX_TO_MM, 3),
-        round(x1 * _PX_TO_MM, 3),
-        round(y1 * _PX_TO_MM, 3),
+        round(float(x0) * _PX_TO_MM, 3),
+        round(float(y0) * _PX_TO_MM, 3),
+        round(float(x1) * _PX_TO_MM, 3),
+        round(float(y1) * _PX_TO_MM, 3),
     )
 
 
@@ -365,8 +369,10 @@ def _paper_fit(
     rotated: dict[str, bool] = {}
     for name, paper in PAPERS.items():
         pw, ph = paper.size_mm
-        result[name] = (w <= pw and h <= ph) or (w <= ph and h <= pw)
-        rotated[name] = w <= ph and h <= pw
+        # bool(): numpy comparisons must not leak np.bool_ into API/persisted
+        # state — it is not a bool subclass and crashes json.dumps.
+        result[name] = bool((w <= pw and h <= ph) or (w <= ph and h <= pw))
+        rotated[name] = bool(w <= ph and h <= pw)
     return result, rotated
 
 
