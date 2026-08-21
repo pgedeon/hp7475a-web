@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import { api, apiErrorMessage, ApiError } from "../api/client";
+import { detectInkColors } from "../lib/inkColors";
 import type { UploadSvgResult, VectorizeResult } from "../api/types";
 import { useApp } from "../state/app";
 import { sanitizePreviewSvg, extractViewBox, innerOf } from "../components/PagePreview";
@@ -46,6 +47,8 @@ export default function VectorizePage({
   const [thresh, setThresh] = useState(0.5);
   const [multipleLines, setMultipleLines] = useState(false);
   const [colors, setColors] = useState(1);
+  const [detected, setDetected] = useState<number | null>(null);
+  const fileSeq = useRef(0);
   const [running, setRunning] = useState(false);
   const [stage, setStage] = useState<string | null>(null);
   const [elapsed, setElapsed] = useState(0);
@@ -71,6 +74,18 @@ export default function VectorizePage({
     setSvgText(null);
     setError(null);
     setStderrTail(null);
+    // Auto-detect dominant ink colors and populate the Colors input.
+    const seq = ++fileSeq.current;
+    setDetected(null);
+    detectInkColors(f)
+      .then((n) => {
+        if (fileSeq.current !== seq) return; // file changed mid-detect
+        setColors(n);
+        setDetected(n);
+      })
+      .catch(() => {
+        if (fileSeq.current === seq) setDetected(null); // detection optional
+      });
   };
 
   const onDrop = (e: DragEvent) => {
@@ -205,8 +220,7 @@ export default function VectorizePage({
                 const n = Number(e.target.value);
                 setColors(Number.isFinite(n) ? Math.min(COLORS_MAX, Math.max(COLORS_MIN, Math.round(n))) : 1);
               }} />
-          </label>
-          <label>
+          </label>          <label>
             Threshold
             <input type="number" min={THRESH_MIN} max={THRESH_MAX} step={0.01}
               value={thresh} disabled={autoThresh || multicolor} data-testid="thresh-input"
@@ -237,6 +251,10 @@ export default function VectorizePage({
             Multi-color: the image is quantized to ≤ {colors} ink colors and each
             color layer is vectorized separately (threshold / multiple-lines not
             applicable). Runtime scales with the number of colors.
+            {detected != null && (
+              <> Auto-detected <span data-testid="detected-colors">{detected}</span> ink
+                color{detected === 1 ? "" : "s"} in the image.</>
+            )}
           </p>
         )}
 

@@ -25,6 +25,12 @@ vi.mock("../api/client", async (importOriginal) => {
 });
 import { api } from "../api/client";
 import type { VectorizeJobStatus } from "../api/types";
+vi.mock("../lib/inkColors", () => ({
+  detectInkColors: vi.fn(async () => 1),
+}));
+import { detectInkColors } from "../lib/inkColors";
+const mockDetect = vi.mocked(detectInkColors);
+
 const mockApi = vi.mocked(api);
 
 const RESULT = {
@@ -52,6 +58,8 @@ async function selectImage() {
     target: { files: [new File(["png"], "cat.png", { type: "image/png" })] },
   });
   await screen.findByText("cat.png");
+  // Auto color detection runs async after upload; flush it.
+  await act(async () => { await Promise.resolve(); });
 }
 
 /** Flush microtasks + one poll interval (POLL_MS = 2000, fake timers). */
@@ -63,6 +71,8 @@ beforeEach(() => {
   // shouldAdvanceTime: RTL waitFor + component sleeps coexist (auto-advance)
   vi.useFakeTimers({ shouldAdvanceTime: true });
   vi.clearAllMocks();
+  mockDetect.mockClear();
+  mockDetect.mockImplementation(async () => 1);
   mockApi.deviceStatus.mockResolvedValue({
     connected: false, port: null, settings: null, status: null,
   });
@@ -139,6 +149,27 @@ describe("VectorizePage", () => {
     expect((input as HTMLInputElement).value).toBe("8");
     fireEvent.change(input, { target: { value: "0" } });
     expect((input as HTMLInputElement).value).toBe("1");
+  });
+
+  it("auto-detects ink colors on upload and populates Colors", async () => {
+    mockDetect.mockImplementation(async () => 4);
+    render(ui(<VectorizePage />));
+    await selectImage();
+    await waitFor(() =>
+      expect(screen.getByTestId("colors-input")).toHaveValue(4));
+    expect(screen.getByTestId("detected-colors")).toHaveTextContent("4");
+  });
+
+  it("detection failure leaves colors untouched", async () => {
+    mockDetect.mockImplementation(async () => {
+      throw new Error("canvas unavailable");
+    });
+    render(ui(<VectorizePage />));
+    await selectImage();
+    await waitFor(() => expect(mockDetect).toHaveBeenCalled());
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.getByTestId("colors-input")).toHaveValue(1);
+    expect(screen.queryByTestId("detected-colors")).not.toBeInTheDocument();
   });
 
   it("busy state polls, shows stage + elapsed, disables Run", async () => {
