@@ -6,7 +6,7 @@
 import type {
   Analysis, AppSettings, ConnectBody, ConnectResult, DeviceError, DeviceStatus,
   Job, JobCreateBody, PaperInfo, PortInfo, SanitizeReport, UploadSvgResult,
-  VectorizeResult,
+  VectorizeJobStatus,
 } from "./types";
 
 const BASE: string = import.meta.env.VITE_API_BASE ?? "/api";
@@ -116,13 +116,24 @@ export const api = {
 
   /** Raster single-line-drawing → SVG via the SLD CLI (goal 950c719c).
    *  Synchronous backend call — 23s–3min; callers own the busy state. */
-  vectorize: async (file: File, opts?: { thresh?: number | null; multipleLines?: boolean }): Promise<VectorizeResult> => {
+  /** Start a background vectorize job (goal a7f70dae) — returns {job_id}.
+   *  colors 1 = single-line B/W; 2–8 = multi-color layered vectorization. */
+  vectorizeStart: async (file: File, opts?: { thresh?: number | null; multipleLines?: boolean; colors?: number }): Promise<{ job_id: string }> => {
     const fd = new FormData();
     fd.append("file", file, file.name);
     if (opts?.thresh != null) fd.append("thresh", String(opts.thresh));
     if (opts?.multipleLines) fd.append("multiple_lines", "true");
-    return req<VectorizeResult>("/vectorize", { method: "POST", body: fd });
+    fd.append("colors", String(opts?.colors ?? 1));
+    return req<{ job_id: string }>("/vectorize", { method: "POST", body: fd });
   },
+
+  /** Poll a background vectorize job. */
+  vectorizeStatus: async (jobId: string): Promise<VectorizeJobStatus> =>
+    req<VectorizeJobStatus>(`/vectorize/${jobId}/status`),
+
+  /** Cancel a queued/running vectorize job. */
+  vectorizeCancel: async (jobId: string): Promise<{ status: string }> =>
+    req<{ status: string }>(`/vectorize/${jobId}`, { method: "DELETE" }),
 
   /** Vectorized SVG text (image/svg+xml) — preview source. */
   vectorizeSvg: async (svgId: string): Promise<string> => {

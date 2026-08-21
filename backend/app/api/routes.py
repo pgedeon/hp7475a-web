@@ -9,6 +9,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
+import time
 from dataclasses import asdict, is_dataclass
 from typing import Any
 
@@ -19,6 +21,7 @@ from pydantic import BaseModel, Field
 
 from app.jobs.models import IllegalTransition, JobState
 from app.jobs.store import JobNotFound
+from app.db import new_id
 from app.jobs.worker import WorkerCommand
 from app.services.serial.paper import PAPERS
 
@@ -356,55 +359,129 @@ def _vectorize_dir(request: Request, svg_id: str) -> Path:
         raise HTTPException(404, "vectorize result not found")
     return d
 
-@router.post("/vectorize")
+# Vectorize background jobs (goal a7f70dae): POST returns immediately, the
+# subprocess runs in a worker thread, the UI polls status and can cancel.
+# In-memory store is fine: jobs are minutes-lived, results persist on disk.
+_VJOBS: dict[str, dict] = {}
+_VJOBS_LOCK = threading.Lock()
+_VJOB_TTL_S = 3600.0  # finished-job records pruned lazily
+
+def _vjob_sweep() -> None:
+    """Drop finished job records older than the TTL (called under lock)."""
+    now = time.monotonic()
+    stale = [
+        jid for jid, j in _VJOBS.items()
+        if j["status"] in ("done", "error") and now - j["ended_at"] > _VJOB_TTL_S
+    ]
+    for jid in stale:
+        _VJOBS.pop(jid, None)
+
+def _run_vjob(job_id: str, data_dir: Path, raw: bytes, filename: str,
+              thresh: float | None, multiple_lines: bool, colors: int) -> None:
+    from app.services.vectorizer import VectorizeError, run_vectorization
+
+    job = _VJOBS[job_id]
+    try:
+        job["status"] = "running"
+        result = run_vectorization(
+            data_dir, raw, filename,
+            thresh=thresh,
+            multiple_lines=multiple_lines,
+            colors=colors,
+            on_stage=lambda text: job.update(stage=text),
+            cancel_event=job["cancel"],
+        )
+        rel = Path(result.svg_path).relative_to(data_dir)
+        job.update(
+            status="done", stage=None,
+            result={
+                "svg_id": result.id,
+                "filename": Path(result.svg_path).name,
+                "path": str(rel),
+                "duration_s": result.duration_s,
+            },
+        )
+    except VectorizeError as exc:
+        job.update(status="error", error={"message": str(exc), "stderr_tail": exc.stderr_tail})
+    except ValueError as exc:
+        job.update(status="error", error={"message": str(exc), "stderr_tail": ""})
+    except Exception as exc:  # defensive: never leave a job stuck "running"
+        logger.exception("vectorize job %s crashed", job_id)
+        job.update(status="error", error={"message": f"internal error: {exc}", "stderr_tail": ""})
+    finally:
+        job["ended_at"] = time.monotonic()
+
+@router.post("/vectorize", status_code=202)
 async def vectorize(
     request: Request,
     file: UploadFile = File(...),
     thresh: float | None = Form(None),
     multiple_lines: bool = Form(False),
+    colors: int = Form(1),
 ) -> dict:
-    """Raster single-line-drawing → SVG via the SLD-Vectorization CLI.
+    """Raster drawing → SVG via SLD-Vectorization, as a BACKGROUND JOB.
 
-    Synchronous: runs the subprocess (23s–3min) and returns the result.
-    Concurrency-limited to 2 (semaphore in the service). ``thresh`` omitted
-    = auto (recommended); 0.01–0.99 for manual override. ``multiple_lines``
-    for multi-stroke inputs."""
-    from app.services.vectorizer import VectorizeError, run_vectorization
+    Returns 202 {job_id} immediately; poll GET /vectorize/{job_id}/status.
+    ``colors`` 1 = single-line B/W (thresh/multiple_lines apply); 2–8 =
+    multi-color layered vectorization. Concurrency-limited to 2; extra jobs
+    queue (status stays "queued"). DELETE /vectorize/{job_id} cancels."""
+    from app.services.vectorizer import MAX_COLORS, MIN_COLORS, validate_image
 
     state = get_state(request)
     raw = await file.read()
-    if thresh is not None and not (0.01 <= thresh <= 0.99):
-        raise HTTPException(422, "thresh must be 0.01..0.99 (or omit for auto)")
     try:
-        # Off-loop: run_vectorization blocks 23s–3min; keep the event loop
-        # (WS status updates, other requests) responsive meanwhile.
-        result = await asyncio.to_thread(
-            run_vectorization,
-            state.settings.data_dir,
-            raw,
-            file.filename or "upload.png",
-            thresh=thresh,
-            multiple_lines=multiple_lines,
-        )
+        # Sync validation: bad uploads fail fast with 422 instead of
+        # creating a job that immediately errors.
+        validate_image(file.filename or "", raw)
     except ValueError as exc:
         raise HTTPException(422, str(exc))
-    except VectorizeError as exc:
-        raise HTTPException(
-            502, {"message": str(exc), "stderr_tail": exc.stderr_tail}
-        )
+    if thresh is not None and not (0.01 <= thresh <= 0.99):
+        raise HTTPException(422, "thresh must be 0.01..0.99 (or omit for auto)")
+    if not (MIN_COLORS <= colors <= MAX_COLORS):
+        raise HTTPException(422, f"colors must be {MIN_COLORS}..{MAX_COLORS} (1 = single-line B/W)")
 
-    data_dir = state.settings.data_dir
-    try:
-        rel = Path(result.svg_path).relative_to(data_dir)
-    except ValueError:
-        rel = Path(result.svg_path)
+    with _VJOBS_LOCK:
+        _vjob_sweep()
+        job_id = new_id()
+        _VJOBS[job_id] = {
+            "status": "queued", "stage": None, "result": None, "error": None,
+            "started_at": time.monotonic(), "ended_at": 0.0,
+            "cancel": threading.Event(),
+        }
+    threading.Thread(
+        target=_run_vjob,
+        args=(job_id, state.settings.data_dir, raw, file.filename or "upload.png",
+              thresh, multiple_lines, colors),
+        name=f"vjob-{job_id}",
+        daemon=True,
+    ).start()
+    return {"job_id": job_id}
 
-    return {
-        "svg_id": result.id,
-        "filename": Path(result.svg_path).name,
-        "path": str(rel),
-        "duration_s": result.duration_s,
-    }
+@router.get("/vectorize/{job_id}/status")
+async def vectorize_status(job_id: str, request: Request) -> dict:
+    """Poll a vectorize job: queued/running (+stage, elapsed) / done / error."""
+    with _VJOBS_LOCK:
+        job = _VJOBS.get(job_id)
+        if job is None:
+            raise HTTPException(404, "vectorize job not found")
+        payload = {
+            "status": job["status"],
+            "stage": job["stage"],
+            "elapsed_s": round((job["ended_at"] or time.monotonic()) - job["started_at"], 1),
+            "result": job["result"],
+            "error": job["error"],
+        }
+    return payload
+
+@router.delete("/vectorize/{job_id}")
+async def vectorize_cancel(job_id: str, request: Request) -> dict:
+    """Cancel a queued/running vectorize job (kills the subprocess)."""
+    with _VJOBS_LOCK:
+        job = _VJOBS.get(job_id)
+        if job is None:
+            raise HTTPException(404, "vectorize job not found")
+    job["cancel"].set()
+    return {"status": "cancelling"}
 
 @router.get("/vectorize/{svg_id}/svg")
 async def vectorize_svg(svg_id: str, request: Request) -> Response:

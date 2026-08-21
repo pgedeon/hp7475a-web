@@ -79,6 +79,15 @@ export interface VectorizeResult {
   duration_s: number;
 }
 
+/** Background vectorize job status (goal a7f70dae). */
+export interface VectorizeJobStatus {
+  status: "queued" | "running" | "done" | "error";
+  stage: string | null;
+  elapsed_s: number;
+  result: VectorizeResult | null;
+  error: { message: string; stderr_tail: string } | null;
+}
+
 export interface ConversionInfo {
   attempted: boolean;
   converted: boolean;

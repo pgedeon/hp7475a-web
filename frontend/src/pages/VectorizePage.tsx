@@ -6,8 +6,12 @@ import { sanitizePreviewSvg, extractViewBox, innerOf } from "../components/PageP
 
 /** Threshold bounds — backend validates 0.01..0.99 (goal 950c719c). */
 const THRESH_MIN = 0.01, THRESH_MAX = 0.99;
+/** Color-layer bounds — backend validates 1..8 (goal a7f70dae). */
+const COLORS_MIN = 1, COLORS_MAX = 8;
+/** Status poll interval while a vectorize job runs. */
+const POLL_MS = 2000;
 
-/** Human message from a vectorize 502 {message, stderr_tail} detail. */
+/** Human message from a vectorize error carrying {message, stderr_tail}. */
 function vectorizeErrorMessage(err: unknown): string {
   if (err instanceof ApiError && err.detail && typeof err.detail === "object") {
     const m = (err.detail as { message?: unknown }).message;
@@ -24,11 +28,12 @@ function stderrTailOf(err: unknown): string | null {
   return null;
 }
 
-/** Raster single-line drawing → SVG via the server-side SLD CLI (goal
- *  950c719c). Synchronous backend call (23 s – 3 min) — the busy state with
- *  elapsed timer makes the wait explicit; result offers download and
- *  "Send to Plot" (uploads the SVG through the normal file flow and hands
- *  it to the Plot tab via onSentToPlot). */
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Raster drawing → SVG via the server-side SLD pipeline (goal 950c719c,
+ *  background jobs goal a7f70dae). POST starts a job; we poll status every
+ *  POLL_MS until done/error and can cancel mid-run. colors ≥ 2 runs the
+ *  multi-color layered pipeline (per-color stroke groups → by-color pen map). */
 export default function VectorizePage({
   onSentToPlot,
 }: {
@@ -40,7 +45,9 @@ export default function VectorizePage({
   const [autoThresh, setAutoThresh] = useState(true);
   const [thresh, setThresh] = useState(0.5);
   const [multipleLines, setMultipleLines] = useState(false);
+  const [colors, setColors] = useState(1);
   const [running, setRunning] = useState(false);
+  const [stage, setStage] = useState<string | null>(null);
   const [elapsed, setElapsed] = useState(0);
   const [result, setResult] = useState<VectorizeResult | null>(null);
   const [svgText, setSvgText] = useState<string | null>(null);
@@ -49,13 +56,14 @@ export default function VectorizePage({
   const [sending, setSending] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
-  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const startedAt = useRef(0);
+  const jobIdRef = useRef<string | null>(null);
+  const cancelRef = useRef(false);
 
-  useEffect(() => () => { if (timerRef.current) clearInterval(timerRef.current); }, []);
+  useEffect(() => () => { cancelRef.current = true; }, []);
 
   const safeSvg = useMemo(() => (svgText ? sanitizePreviewSvg(svgText) : null), [svgText]);
   const vb = useMemo(() => (svgText ? extractViewBox(svgText) : null), [svgText]);
+  const multicolor = colors > 1;
 
   const selectFile = (f: File) => {
     setFile(f);
@@ -77,6 +85,12 @@ export default function VectorizePage({
     setThresh(Number.isFinite(n) ? Math.min(THRESH_MAX, Math.max(THRESH_MIN, n)) : THRESH_MIN);
   };
 
+  const resetBusy = () => {
+    setRunning(false);
+    setStage(null);
+    jobIdRef.current = null;
+  };
+
   const run = async () => {
     if (!file || running) return;
     setRunning(true);
@@ -84,24 +98,50 @@ export default function VectorizePage({
     setSvgText(null);
     setError(null);
     setStderrTail(null);
-    startedAt.current = Date.now();
     setElapsed(0);
-    timerRef.current = setInterval(
-      () => setElapsed((Date.now() - startedAt.current) / 1000), 1000);
+    setStage("starting job");
+    cancelRef.current = false;
     try {
-      const r = await api.vectorize(file, {
-        thresh: autoThresh ? null : thresh,
-        multipleLines,
+      const { job_id } = await api.vectorizeStart(file, {
+        thresh: autoThresh || multicolor ? null : thresh,
+        multipleLines: multipleLines && !multicolor,
+        colors,
       });
-      setResult(r);
-      setSvgText(await api.vectorizeSvg(r.svg_id));
+      jobIdRef.current = job_id;
+
+      for (;;) {
+        if (cancelRef.current) return; // cancelled locally
+        await sleep(POLL_MS);
+        if (cancelRef.current) return;
+        const st = await api.vectorizeStatus(job_id);
+        setStage(st.stage ?? (st.status === "queued" ? "queued" : null));
+        setElapsed(st.elapsed_s);
+        if (st.status === "done" && st.result) {
+          setResult(st.result);
+          setSvgText(await api.vectorizeSvg(st.result.svg_id));
+          break;
+        }
+        if (st.status === "error") {
+          setError(st.error?.message ?? "vectorization failed");
+          setStderrTail(st.error?.stderr_tail || null);
+          break;
+        }
+      }
     } catch (e) {
       setError(vectorizeErrorMessage(e));
       setStderrTail(stderrTailOf(e));
     } finally {
-      if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
-      setRunning(false);
+      resetBusy();
     }
+  };
+
+  const cancel = async () => {
+    const id = jobIdRef.current;
+    cancelRef.current = true;
+    if (id) {
+      try { await api.vectorizeCancel(id); } catch { /* best effort */ }
+    }
+    resetBusy();
   };
 
   const download = () => {
@@ -137,8 +177,9 @@ export default function VectorizePage({
       <section className="panel">
         <h2>1 · Upload image</h2>
         <p className="muted small">
-          Raster single-line drawing (PNG/JPG/…) → SVG via SLD-Vectorization,
-          running on the server. One vectorization takes 23 s – 3 min.
+          Raster line drawing (PNG/JPG/…) → SVG via SLD-Vectorization, running
+          on the server as a background job. Simple drawings take ~30 s;
+          complex ones can take several minutes.
         </p>
         <div
           className={`dropzone${dragOver ? " over" : ""}`}
@@ -155,40 +196,64 @@ export default function VectorizePage({
         </div>
 
         <h3>Options</h3>
-        <div className="mode-toggle" role="group" aria-label="threshold mode">
-          <button type="button" aria-pressed={autoThresh} data-testid="thresh-auto"
-            onClick={() => setAutoThresh(true)}>Auto threshold</button>
-          <button type="button" aria-pressed={!autoThresh} data-testid="thresh-manual"
-            onClick={() => setAutoThresh(false)}>Manual</button>
-        </div>
         <div className="opt-grid" role="group" aria-label="vectorize options">
+          <label>
+            Colors
+            <input type="number" min={COLORS_MIN} max={COLORS_MAX} step={1}
+              value={colors} data-testid="colors-input" aria-label="color layers"
+              onChange={(e) => {
+                const n = Number(e.target.value);
+                setColors(Number.isFinite(n) ? Math.min(COLORS_MAX, Math.max(COLORS_MIN, Math.round(n))) : 1);
+              }} />
+          </label>
           <label>
             Threshold
             <input type="number" min={THRESH_MIN} max={THRESH_MAX} step={0.01}
-              value={thresh} disabled={autoThresh} data-testid="thresh-input"
+              value={thresh} disabled={autoThresh || multicolor} data-testid="thresh-input"
               aria-label="threshold"
               onChange={(e) => onThreshChange(e.target.value)} />
           </label>
-          <label>
-            <input type="checkbox" checked={multipleLines} data-testid="multiple-lines"
-              onChange={(e) => setMultipleLines(e.target.checked)} />
-            Multiple lines (multi-stroke input)
-          </label>
         </div>
-        <p className="muted small">
-          Threshold 0.01–0.99 = dark-pixel cutoff; Auto (omit) is recommended.
-        </p>
+        {!multicolor && (
+          <>
+            <div className="mode-toggle" role="group" aria-label="threshold mode">
+              <button type="button" aria-pressed={autoThresh} data-testid="thresh-auto"
+                onClick={() => setAutoThresh(true)}>Auto threshold</button>
+              <button type="button" aria-pressed={!autoThresh} data-testid="thresh-manual"
+                onClick={() => setAutoThresh(false)}>Manual</button>
+            </div>
+            <label>
+              <input type="checkbox" checked={multipleLines} data-testid="multiple-lines"
+                onChange={(e) => setMultipleLines(e.target.checked)} />
+              Multiple lines (multi-stroke input)
+            </label>
+            <p className="muted small">
+              Threshold 0.01–0.99 = dark-pixel cutoff; Auto (omit) is recommended.
+            </p>
+          </>
+        )}
+        {multicolor && (
+          <p className="muted small" data-testid="multicolor-hint">
+            Multi-color: the image is quantized to ≤ {colors} ink colors and each
+            color layer is vectorized separately (threshold / multiple-lines not
+            applicable). Runtime scales with the number of colors.
+          </p>
+        )}
 
         <div className="row-actions">
           <button className="primary" disabled={!file || running}
             onClick={() => void run()} data-testid="run-btn">
             {running ? `Vectorizing… ${Math.floor(elapsed)} s` : "Vectorize"}
           </button>
+          {running && (
+            <button onClick={() => void cancel()} data-testid="cancel-btn">Cancel</button>
+          )}
         </div>
         {running && (
           <div className="banner info" role="status" data-testid="busy">
             Vectorization running — <span data-testid="elapsed">{Math.floor(elapsed)} s</span> elapsed.
-            This can take 23 s – 3 min; keep this tab open.
+            {stage && <> Current step: <span data-testid="stage">{stage}</span>.</>}
+            {" "}Keep this tab open.
           </div>
         )}
         {error && (
@@ -215,7 +280,11 @@ export default function VectorizePage({
                   role="img" aria-label="vectorized preview">
                   <g dangerouslySetInnerHTML={{ __html: safeSvg.includes("<svg") ? innerOf(safeSvg) : safeSvg }} />
                 </svg>
-                <p className="small muted">Vectorized single-line drawing — check the strokes before plotting.</p>
+                <p className="small muted">
+                  {multicolor
+                    ? "Vectorized color layers — map each stroke color to a pen on the Plot tab."
+                    : "Vectorized single-line drawing — check the strokes before plotting."}
+                </p>
               </div>
             ) : (
               <div className="preview-empty" data-testid="vectorize-preview">
