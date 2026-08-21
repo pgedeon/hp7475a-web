@@ -70,6 +70,15 @@ export interface Analysis {
   [k: string]: unknown;
 }
 
+/** POST /api/vectorize result (goal 950c719c). */
+export interface VectorizeResult {
+  svg_id: string;
+  filename: string;
+  /** data-relative path of the produced SVG (backend storage) */
+  path: string;
+  duration_s: number;
+}
+
 export interface ConversionInfo {
   attempted: boolean;
   converted: boolean;

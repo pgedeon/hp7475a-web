@@ -2,13 +2,14 @@ import { useState } from "react";
 import { AppProvider, useApp } from "./state/app";
 import Toasts from "./components/Toast";
 import PlotPage from "./pages/PlotPage";
+import VectorizePage from "./pages/VectorizePage";
 import ManualPage from "./pages/ManualPage";
 import JobsPage from "./pages/JobsPage";
 import DevicePage from "./pages/DevicePage";
 import DiagnosticsPage from "./pages/DiagnosticsPage";
 import SettingsPage from "./pages/SettingsPage";
 
-const TABS = ["Plot", "Manual", "Jobs", "Device", "Diagnostics", "Settings"] as const;
+const TABS = ["Plot", "Vectorize", "Manual", "Jobs", "Device", "Diagnostics", "Settings"] as const;
 type Tab = (typeof TABS)[number];
 
 /** Tab shell + global status header (backend WS state, device connection). */
@@ -36,6 +37,7 @@ function Shell() {
       </header>
       <main>
         {tab === "Plot" && <PlotPage />}
+        {tab === "Vectorize" && <VectorizePage onSentToPlot={() => setTab("Plot")} />}
         {tab === "Manual" && <ManualPage />}
         {tab === "Jobs" && <JobsPage />}
         {tab === "Device" && <DevicePage />}

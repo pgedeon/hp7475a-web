@@ -344,6 +344,76 @@ async def file_raw(file_id: str, request: Request) -> Response:
     return Response(content=data, media_type=media)
 
 
+# ---------------------------------------------------------------- vectorize
+
+def _vectorize_dir(request: Request, svg_id: str) -> Path:
+    """Resolve a vectorize job dir, refusing path traversal (404 on bad id)."""
+    if not svg_id or "/" in svg_id or "\\" in svg_id or ".." in svg_id:
+        raise HTTPException(404, "vectorize result not found")
+    d = get_state(request).settings.data_dir / "vectorize" / svg_id
+    if not d.is_dir():
+        raise HTTPException(404, "vectorize result not found")
+    return d
+
+@router.post("/vectorize")
+async def vectorize(
+    request: Request,
+    file: UploadFile = File(...),
+    thresh: float | None = Form(None),
+    multiple_lines: bool = Form(False),
+) -> dict:
+    """Raster single-line-drawing → SVG via the SLD-Vectorization CLI.
+
+    Synchronous: runs the subprocess (23s–3min) and returns the result.
+    Concurrency-limited to 2 (semaphore in the service). ``thresh`` omitted
+    = auto (recommended); 0.01–0.99 for manual override. ``multiple_lines``
+    for multi-stroke inputs."""
+    from app.services.vectorizer import VectorizeError, run_vectorization
+
+    state = get_state(request)
+    raw = await file.read()
+    if thresh is not None and not (0.01 <= thresh <= 0.99):
+        raise HTTPException(422, "thresh must be 0.01..0.99 (or omit for auto)")
+    try:
+        result = run_vectorization(
+            state.settings.data_dir,
+            raw,
+            file.filename or "upload.png",
+            thresh=thresh,
+            multiple_lines=multiple_lines,
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+    except VectorizeError as exc:
+        raise HTTPException(
+            502, {"message": str(exc), "stderr_tail": exc.stderr_tail}
+        )
+
+    data_dir = state.settings.data_dir
+    try:
+        rel = Path(result.svg_path).relative_to(data_dir)
+    except ValueError:
+        rel = Path(result.svg_path)
+
+    return {
+        "svg_id": result.id,
+        "filename": Path(result.svg_path).name,
+        "path": str(rel),
+        "duration_s": result.duration_s,
+    }
+
+@router.get("/vectorize/{svg_id}/svg")
+async def vectorize_svg(svg_id: str, request: Request) -> Response:
+    """Serve a vectorized SVG (image/svg+xml)."""
+    d = _vectorize_dir(request, svg_id)
+    svg = d / "output.svg"
+    if not svg.is_file():
+        raise HTTPException(404, "vectorize result not found")
+    return Response(
+        content=svg.read_bytes(), media_type="image/svg+xml"
+    )
+
+
 # ---------------------------------------------------------------- jobs
 
 class JobCreateBody(BaseModel):

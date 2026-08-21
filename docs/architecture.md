@@ -56,6 +56,7 @@ attempts raise `IllegalTransition` → HTTP 409.
 SQLite (`data/hp7475a.sqlite3`, WAL): `jobs`, `settings` (kv), `schema_meta`.
 Uploads under `data/files/<id>/` (source + meta.json with sanitize/analysis).
 Previews under `data/previews/<job>.svg`.
+Vectorize results under `data/vectorize/<id>/` (input + `output.svg`).
 
 ## Failure taxonomy (transport)
 

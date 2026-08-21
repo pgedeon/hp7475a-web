@@ -64,6 +64,11 @@ select / up / down / park):
 - **Single-writer job queue** — one hardware worker owns the serial port;
   states QUEUED→PREPARING→READY→SENDING→PLOTTING→COMPLETING→COMPLETED with
   PAUSED/CANCELLED/FAILED/DISCONNECTED, pause/resume/cancel, history.
+- **Vectorize tab** — raster single-line drawings (PNG/JPG) → SVG via
+  [SLD-Vectorization](https://github.com/tanguymagne/SLD-Vectorization)
+  (server-side CLI, auto or manual threshold, multi-stroke mode), with
+  preview, SVG download and one-click **Send to Plot** into the normal
+  upload → pen-map → plot pipeline.
 - **Manual controls** — jog pad (mm or plotter units, hard-clip clamped),
   pen up/down/select, park, velocity — disabled when disconnected.
 - **Live status** — WebSocket updates (job progress, device events), status

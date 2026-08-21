@@ -6,6 +6,7 @@
 import type {
   Analysis, AppSettings, ConnectBody, ConnectResult, DeviceError, DeviceStatus,
   Job, JobCreateBody, PaperInfo, PortInfo, SanitizeReport, UploadSvgResult,
+  VectorizeResult,
 } from "./types";
 
 const BASE: string = import.meta.env.VITE_API_BASE ?? "/api";
@@ -111,6 +112,30 @@ export const api = {
     const fd = new FormData();
     fd.append("file", file, file.name);
     return req("/files/hpgl", { method: "POST", body: fd });
+  },
+
+  /** Raster single-line-drawing → SVG via the SLD CLI (goal 950c719c).
+   *  Synchronous backend call — 23s–3min; callers own the busy state. */
+  vectorize: async (file: File, opts?: { thresh?: number | null; multipleLines?: boolean }): Promise<VectorizeResult> => {
+    const fd = new FormData();
+    fd.append("file", file, file.name);
+    if (opts?.thresh != null) fd.append("thresh", String(opts.thresh));
+    if (opts?.multipleLines) fd.append("multiple_lines", "true");
+    return req<VectorizeResult>("/vectorize", { method: "POST", body: fd });
+  },
+
+  /** Vectorized SVG text (image/svg+xml) — preview source. */
+  vectorizeSvg: async (svgId: string): Promise<string> => {
+    let res: Response;
+    try {
+      res = await fetch(`${BASE}/vectorize/${svgId}/svg`);
+    } catch {
+      throw new ApiError(0, "Backend unreachable — is the server running on :8750?");
+    }
+    if (!res.ok) {
+      throw new ApiError(res.status, `HTTP ${res.status}`);
+    }
+    return res.text();
   },
 
   analysis: (fileId: string) => req<Analysis>(`/files/${fileId}/analysis`),
