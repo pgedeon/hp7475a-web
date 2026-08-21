@@ -6,6 +6,7 @@ and translate domain errors to proper HTTP codes. No business logic here.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from dataclasses import asdict, is_dataclass
@@ -375,7 +376,10 @@ async def vectorize(
     if thresh is not None and not (0.01 <= thresh <= 0.99):
         raise HTTPException(422, "thresh must be 0.01..0.99 (or omit for auto)")
     try:
-        result = run_vectorization(
+        # Off-loop: run_vectorization blocks 23s–3min; keep the event loop
+        # (WS status updates, other requests) responsive meanwhile.
+        result = await asyncio.to_thread(
+            run_vectorization,
             state.settings.data_dir,
             raw,
             file.filename or "upload.png",

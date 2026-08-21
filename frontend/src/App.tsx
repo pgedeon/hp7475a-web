@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { AppProvider, useApp } from "./state/app";
 import Toasts from "./components/Toast";
+import type { UploadSvgResult } from "./api/types";
 import PlotPage from "./pages/PlotPage";
 import VectorizePage from "./pages/VectorizePage";
 import ManualPage from "./pages/ManualPage";
@@ -15,6 +16,7 @@ type Tab = (typeof TABS)[number];
 /** Tab shell + global status header (backend WS state, device connection). */
 function Shell() {
   const [tab, setTab] = useState<Tab>("Plot");
+  const [plotFile, setPlotFile] = useState<UploadSvgResult | null>(null);
   const { ws, device } = useApp();
   return (
     <div className="app">
@@ -36,8 +38,8 @@ function Shell() {
         </nav>
       </header>
       <main>
-        {tab === "Plot" && <PlotPage />}
-        {tab === "Vectorize" && <VectorizePage onSentToPlot={() => setTab("Plot")} />}
+        {tab === "Plot" && <PlotPage initialFile={plotFile} />}
+        {tab === "Vectorize" && <VectorizePage onSentToPlot={(f) => { setPlotFile(f); setTab("Plot"); }} />}
         {tab === "Manual" && <ManualPage />}
         {tab === "Jobs" && <JobsPage />}
         {tab === "Device" && <DevicePage />}

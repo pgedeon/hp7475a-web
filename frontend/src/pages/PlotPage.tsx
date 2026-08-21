@@ -41,10 +41,10 @@ function SanitizeReportView({ report }: { report: Record<string, unknown> }) {
   );
 }
 
-export default function PlotPage() {
+export default function PlotPage({ initialFile }: { initialFile?: UploadSvgResult | null } = {}) {
   const { papers, papersError, retryPapers, toast, ws } = useApp();
 
-  const [file, setFile] = useState<UploadSvgResult | null>(null);
+  const [file, setFile] = useState<UploadSvgResult | null>(initialFile ?? null);
   const [analysis, setAnalysis] = useState<Analysis | null>(null);
   const [analysisError, setAnalysisError] = useState<string | null>(null);
   const [mapMode, setMapMode] = useState<PenMapMode>("layers");
